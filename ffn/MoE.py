@@ -30,6 +30,8 @@ class MoE(nn.Module):
 
     def __init__(self, model_dim, num_experts, top_k):
         super().__init__()
+        if model_dim <= 0 or num_experts <= 0 or not 1 <= top_k <= num_experts:
+            raise ValueError("model_dim、num_experts 必须为正，且 1 <= top_k <= num_experts")
         self.model_dim = model_dim
         self.num_experts = num_experts
         self.top_k = top_k
@@ -57,11 +59,14 @@ class MoE(nn.Module):
         Returns:
             output: 专家混合输出 [batch_size, seq_len, model_dim]
         """
+        if x.ndim != 3 or x.shape[-1] != self.model_dim:
+            raise ValueError("x 必须是 [batch_size, seq_len, model_dim]")
         batch_size, seq_len, model_dim = x.shape
 
         # 展平 batch 和 seq 维度以便处理
         # x_flat: [batch_size * seq_len, model_dim]
-        x_flat = x.view(-1, model_dim)
+        # transpose 等操作会产生非连续张量；reshape 会在必要时复制。
+        x_flat = x.reshape(-1, model_dim)
 
         # 步骤1: 路由器计算每个 token 对每个专家的得分
         # gate_logits: [batch_size * seq_len, num_experts]

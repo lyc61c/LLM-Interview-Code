@@ -36,8 +36,9 @@ env/
 # Jupyter Notebook
 .ipynb_checkpoints/
 
-# Local test files
-tests/
+# Test and dependency caches (tests themselves are versioned)
+.pytest_cache/
+.uv-cache/
 
 # Model weights and data
 *.pt

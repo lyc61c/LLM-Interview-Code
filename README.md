@@ -2,9 +2,49 @@
 
 > 大模型面试必备：从注意力机制到强化学习，从零实现核心组件
 
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)]()
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)]()
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)]()
-[![License](https://img.shields.io/badge/License-MIT-green.svg)]()
+
+本地增补版基于 [ckd0817/LLM-Interview-Code](https://github.com/ckd0817/LLM-Interview-Code)
+的 `820ce2b`，对照 [AIR-hl/llm-interview-code](https://github.com/AIR-hl/llm-interview-code)
+的题目范围补齐实现，并增加数值、梯度和边界测试。
+
+## 快速开始
+
+在仓库根目录执行，Python 3.10+。Windows PowerShell：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m examples.quickstart
+```
+
+Linux / macOS 可将上述 Python 路径替换为 `.venv/bin/python`。
+核心依赖只有 PyTorch；BPE 与工具调用解析使用 Python 标准库。
+PPO 绘图示例需要另外安装 `matplotlib`，导入损失函数时不需要它。
+
+按练习顺序阅读 [手撕题学习清单](docs/INTERVIEW_GUIDE.md)，新增范围见下表。
+
+| 主题 | 实现入口 | 本次补充 |
+|---|---|---|
+| 缓存注意力 | [MultiHeadAttentionWithKVCache.py](attention/MultiHeadAttentionWithKVCache.py) | prefill、逐 token / 分块 decode、RoPE offset |
+| 掩码 | [AttentionMask.py](attention/AttentionMask.py) | padding、causal、缓存位置偏移与合并 |
+| 线性层 | [Linear.py](components/Linear.py) | 手写参数、矩阵乘与 bias |
+| 激活 | [Activation.py](components/Activation.py) | 手写 Sigmoid、SiLU |
+| BPE | [BPE.py](tokenizer/BPE.py) | byte-level 合并训练、编码与解码 |
+| 对比学习 | [InfoNCELoss.py](loss/InfoNCELoss.py) | 批内负样本、温度与对称损失 |
+| 量化 | [Quantization.py](components/Quantization.py) | 对称 / 非对称 INT8、反量化、常量边界 |
+| 生成采样 | [Sampling.py](generation/Sampling.py) | greedy、temperature、top-k、top-p |
+| 工具调用 | [ToolCallParser.py](tools/ToolCallParser.py) | 交错流事件、增量 JSON 参数解析 |
+| DAPO | [DAPOLoss.py](loss/DAPOLoss.py) | 非对称 clipping、有效 token 归一化 |
+| GSPO | [GSPOLoss.py](loss/GSPOLoss.py) | 序列级比率与 clipping |
+| KL 估计 | [KLDivergence.py](loss/KLDivergence.py) | k1 / k2 / k3 采样估计 |
+| 交叉熵 | [EntropyLoss.py](loss/EntropyLoss.py) | 硬标签、软标签与数值稳定性 |
+
+本仓库是教学实现。DAPO / GSPO 文件覆盖损失核心，DAPO 的动态采样、
+超长样本处理等训练系统功能需结合原论文和框架实现。
 
 ## 目录
 
@@ -30,6 +70,7 @@
   - [DPO Loss](#dpo-loss)
   - [PPO Loss](#ppo-loss)
   - [GRPO Loss](#grpo-loss)
+  - [DAPO / GSPO / InfoNCE / KL](#新增损失函数)
 - [参数高效微调](#参数高效微调)
   - [LoRA](#lora)
 - [参考文献](#参考文献)
@@ -46,9 +87,10 @@
 - **参数高效微调**：LoRA
 
 **项目特色**：
-- 从零实现，无第三方依赖
+- 使用 PyTorch 核心算子实现，不依赖 Transformers 等高层组件
 - 详细注释，张量形状图解
 - 公式推导，原理解析
+- 对照参考实现检查数值与梯度，验证缓存解码与边界输入
 
 ---
 
@@ -60,7 +102,9 @@
 
 仔细观察这些代码，你会发现**它们大多是在进行维度变化和对齐的操作**——reshape、transpose、expand、concatenate……掌握这些操作，就能理解数据在网络中是如何流动的。
 
-因此，掌握这些 LLM 组件的本质是**理解并记忆各种张量操作**。面试手撕代码时，考察的重点也是张量操作和原理的记忆，而非参数如何形成。**张量操作是理解这一切的基础**。
+因此，练习这些 LLM 组件时，需要同时理解张量操作、数学定义和梯度流向。
+能够写出正确的形状变换，还要解释 mask、归一化、损失缩放与数值稳定性，
+并通过小样本检验实现。**张量操作是理解这一切的基础**。
 
 为此，我专门准备了一个教程：[PyTorch 张量变换与重塑教程](pytorch_tensor_reshape.ipynb)
 
@@ -74,7 +118,13 @@ LLM-Interview-Code/
 │   ├── ScaledDotProductAttention.py
 │   ├── MultiHeadAttention.py
 │   ├── GroupQueryAttention.py
-│   └── MultiLatentAttention.py
+│   ├── MultiLatentAttention.py
+│   ├── MultiHeadAttentionWithKVCache.py
+│   └── AttentionMask.py
+├── components/                    # 从零实现的基础组件
+│   ├── Linear.py
+│   ├── Activation.py
+│   └── Quantization.py
 ├── normalization/                 # 归一化层
 │   ├── LayerNorm.py
 │   └── RMSNorm.py
@@ -90,9 +140,22 @@ LLM-Interview-Code/
 │   ├── PPOLoss.py
 │   ├── GRPOLoss.py
 │   ├── PretainLoss.py
-│   └── EntropyLoss.py
+│   ├── EntropyLoss.py
+│   ├── InfoNCELoss.py
+│   ├── KLDivergence.py
+│   ├── DAPOLoss.py
+│   └── GSPOLoss.py
 ├── peft/                          # 参数高效微调
 │   └── LoRALinear.py
+├── tokenizer/BPE.py               # byte-level BPE
+├── generation/Sampling.py         # 生成采样
+├── tools/ToolCallParser.py         # 工具调用流式解析
+├── examples/quickstart.py          # 可运行的练习示例
+├── tests/                         # 数值、梯度和回归验证
+├── docs/INTERVIEW_GUIDE.md         # 练习顺序、公式与关键边界
+├── requirements.txt
+├── requirements-dev.txt
+├── pyproject.toml
 ├── pytorch_tensor_reshape.ipynb   # PyTorch 张量操作教程
 └── README.md
 ```
@@ -104,6 +167,9 @@ LLM-Interview-Code/
 > **实现说明**
 > 本仓库里的注意力模块默认使用 `dropout_p=0.0`，更贴近近两年主流 decoder-only LLM 的常见配置。
 > 如果你是为了讲解经典 Transformer 正则化，或者在小数据训练中想显式增加随机性，可以手动传入非零 dropout。
+
+本仓库 attention mask 统一约定为 **True / 1 = 允许注意，False / 0 = 屏蔽**。
+缓存解码时 query 的绝对位置从 `past_len` 开始，不能直接套用从零开始的方形下三角 mask。
 
 ### Scaled Dot-Product Attention
 
@@ -443,7 +509,7 @@ SwiGLU 是 GLU（Gated Linear Unit）变体之一，被 LLaMA、PaLM 等模型�
 
 #### 核心公式
 
-$$\text{SwiGLU}(x) = (W_{gate}(x) \odot \text{SiLU}(W_{up}(x))) \cdot W_{down}$$
+$$\text{SwiGLU}(x) = W_{down}\left(\text{SiLU}(W_{gate}(x)) \odot W_{up}(x)\right)$$
 
 其中：
 - $\text{SiLU}(x) = x \cdot \sigma(x)$ （也称为 Swish）
@@ -601,7 +667,9 @@ $$\mathcal{L}_{DPO} = -\mathbb{E}\left[\log \sigma\left(\beta \left(\log \frac{\
 
 #### 核心公式
 
-$$\mathcal{L}_{PPO} = \mathbb{E}\left[\min\left(r_t(\theta) \hat{A}_t, \text{clip}(r_t, 1-\epsilon, 1+\epsilon)\hat{A}_t\right)\right]$$
+$$\mathcal{L}_{PPO} = -\mathbb{E}\left[\min\left(r_t(\theta) \hat{A}_t, \text{clip}(r_t, 1-\epsilon, 1+\epsilon)\hat{A}_t\right)\right]$$
+
+上式是供梯度下降最小化的 loss；论文中最大化的策略目标使用相反符号。
 
 其中：
 - $r_t = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)}$（重要性采样比率）
@@ -663,6 +731,20 @@ $$\mathcal{L}_{GRPO} = -\mathbb{E}\left[\frac{1}{G}\sum_{i=1}^{G} \min\left(\rho
 
 ---
 
+### 新增损失函数
+
+| 损失 | 关键计算 | 需要说明的区别 |
+|---|---|---|
+| InfoNCE | 归一化特征的相似度矩阵、温度缩放、对角正样本 | 分母包含正样本；可选双向计算 |
+| DAPO | token 级重要性比率、非对称 clipping | 全体有效 token 等权，长回答贡献更多 token |
+| GSPO | 每条回答的平均 log ratio，再取 exp | 每条有效回答等权，序列级 clipping |
+| KL k1 / k2 / k3 | log ratio、平方近似、控制变量估计 | 采样分布与 KL 方向必须明确，k2 一般有偏 |
+| 软标签 CE | `-sum(target * log_softmax(logits))` | 与硬标签索引式 CE 的输入形状不同 |
+
+具体 API、公式和验证方式见 [手撕题学习清单](docs/INTERVIEW_GUIDE.md)。
+
+---
+
 ## 参数高效微调
 
 ### LoRA
@@ -684,6 +766,9 @@ $$h = W_0 x + \Delta W x = W_0 x + BAx$$
 - $r \ll \min(d, k)$：低秩维度
 
 **关键设计**：$B$ 初始化为零，使得初始状态 $BA = 0$，保证微调开始时模型行为不变。
+
+`LoRALinear.merged_linear()` 返回一个独立的合并线性层，可在 `eval()` 后用于推理。
+原模块的权重与训练状态保留，梯度仍能通过冻结的基础分支传向输入。
 
 #### 张量形状流程图
 
@@ -729,6 +814,10 @@ flowchart TD
 - [Proximal Policy Optimization](https://arxiv.org/abs/1707.06347) - PPO
 - [DeepSeekMath](https://arxiv.org/abs/2402.03300) - GRPO
 - [DeepSeek-R1](https://arxiv.org/abs/2501.12948) - GRPO
+- [DAPO](https://arxiv.org/abs/2503.14476) - 非对称 clipping 与 token 归一化
+- [Group Sequence Policy Optimization](https://arxiv.org/abs/2507.18071) - GSPO
+- [Representation Learning with Contrastive Predictive Coding](https://arxiv.org/abs/1807.03748) - InfoNCE
+- [Approximating KL Divergence](http://joschu.net/blog/kl-approx.html) - k1 / k2 / k3
 
 ### 参数高效微调
 - [LoRA: Low-Rank Adaptation](https://arxiv.org/abs/2106.09685)

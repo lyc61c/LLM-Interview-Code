@@ -9,8 +9,10 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
+try:
+    from .ScaledDotProductAttention import scaled_dot_product_attention, zero_fully_masked_queries
+except ImportError:  # 兼容直接运行此文件
+    from ScaledDotProductAttention import scaled_dot_product_attention, zero_fully_masked_queries
 
 
 class GroupQueryAttention(nn.Module):
@@ -36,12 +38,16 @@ class GroupQueryAttention(nn.Module):
     def __init__(self, model_dim, num_heads, num_kv_heads, dropout_p=0.0):
         super().__init__()
 
+        if any(not isinstance(n, int) or n <= 0 for n in (model_dim, num_heads, num_kv_heads)):
+            raise ValueError("model_dim, num_heads and num_kv_heads must be positive integers")
         self.model_dim = model_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
 
-        assert model_dim % num_heads == 0, "model_dim must be divisible by num_heads"
-        assert num_heads % num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
+        if model_dim % num_heads != 0:
+            raise ValueError("model_dim must be divisible by num_heads")
+        if num_heads % num_kv_heads != 0:
+            raise ValueError("num_heads must be divisible by num_kv_heads")
 
         self.head_dim = model_dim // num_heads
         self.num_rep = num_heads // num_kv_heads  # 每个 KV 头被复制的次数
@@ -70,6 +76,8 @@ class GroupQueryAttention(nn.Module):
         Returns:
             扩展后的张量 [batch_size, num_heads, seq_len, head_dim]
         """
+        if not isinstance(x, torch.Tensor) or x.ndim != 4 or not isinstance(n_rep, int) or n_rep <= 0:
+            raise ValueError("x must be 4D and n_rep must be a positive integer")
         batch_size, num_kv_heads, seq_len, head_dim = x.shape
 
         if n_rep == 1:
@@ -95,11 +103,14 @@ class GroupQueryAttention(nn.Module):
 
         Args:
             x: 输入张量 [batch_size, seq_len, model_dim]
-            mask: 注意力掩码 [batch_size, 1, seq_len, seq_len] 或 [1, 1, seq_len, seq_len]
+            mask: True/1 允许注意，False/0 屏蔽；可广播到 [B,H,T,T]。
+                  全屏蔽 query 的输出为零。默认不自动添加 causal mask。
 
         Returns:
             output: 注意力输出 [batch_size, seq_len, model_dim]
         """
+        if not isinstance(x, torch.Tensor) or x.ndim != 3 or x.shape[-1] != self.model_dim or x.shape[1] == 0:
+            raise ValueError("x must have shape [batch, seq_len, model_dim]")
         batch_size, seq_len, _ = x.shape
 
         # ========== 线性变换得到 Q, K, V ==========
@@ -125,19 +136,8 @@ class GroupQueryAttention(nn.Module):
         v = self.repeat_kv(v, self.num_rep)
 
         # ========== 计算注意力得分 ==========
-        # scores: [batch_size, num_heads, seq_len, seq_len]
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, -1e9)
-
-        # attn_weights: [batch_size, num_heads, seq_len, seq_len]
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-
-        # ========== 计算上下文向量 ==========
-        # context: [batch_size, num_heads, seq_len, head_dim]
-        context = torch.matmul(attn_weights, v)
+        # GQA 的分数缩放仍为 sqrt(head_dim)，不是 sqrt(model_dim)。
+        context, _ = scaled_dot_product_attention(q, k, v, mask, self.dropout)
 
         # ========== 拼接多头 ==========
         # [batch_size, num_heads, seq_len, head_dim] -> [batch_size, seq_len, num_heads, head_dim]
@@ -148,4 +148,4 @@ class GroupQueryAttention(nn.Module):
         output = context.view(batch_size, seq_len, self.model_dim)
         output = self.w_o(output)
 
-        return output
+        return zero_fully_masked_queries(output, mask, self.num_heads, seq_len)

@@ -7,7 +7,7 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from ._utils import causal_lm_loss
 
 
 class SFTLoss(nn.Module):
@@ -36,31 +36,14 @@ class SFTLoss(nn.Module):
         Returns:
             loss: 标量损失值
         """
-        # 步骤1: 构造 masked labels
-        # 将 prompt 部分的标签设为 -100（ignore_index）
-        masked_labels = labels.clone()
-        for batch_idx, prompt_length in enumerate(prompt_lengths):
-            masked_labels[batch_idx, :prompt_length] = -100  # 设置为 ignore_index
-
-        # 步骤2: 移位操作（Shift）
-        # 预测下一个词：logits 去掉最后一个，labels 去掉第一个
-        # shifted_logits: [batch_size, seq_len-1, vocab_size]
-        shifted_logits = logits[:, :-1, :].contiguous()
-
-        # shifted_labels: [batch_size, seq_len-1]
-        shifted_labels = masked_labels[:, 1:].contiguous()
-
-        # 步骤3: 展平张量
-        batch_size, seq_length, vocab_size = shifted_logits.size()
-
-        # flattened_logits: [batch_size * (seq_len-1), vocab_size]
-        flattened_logits = shifted_logits.view(-1, vocab_size)
-
-        # flattened_labels: [batch_size * (seq_len-1)]
-        flattened_labels = shifted_labels.view(-1)
-
-        # 步骤4: 计算交叉熵损失
-        # ignore_index=-100 的位置（prompt 部分）不参与损失计算
-        loss = F.cross_entropy(flattened_logits, flattened_labels, ignore_index=-100)
-
-        return loss
+        if logits.ndim != 3 or labels.shape != logits.shape[:2]:
+            raise ValueError("logits 必须为 [B,T,V]，labels 必须为 [B,T]")
+        prompt_lengths = torch.as_tensor(prompt_lengths, device=labels.device)
+        if prompt_lengths.shape != (labels.shape[0],) or prompt_lengths.dtype not in (torch.int32, torch.int64):
+            raise ValueError("prompt_lengths 必须是 [B] 的整数张量或列表")
+        if ((prompt_lengths < 0) | (prompt_lengths > labels.shape[1])).any():
+            raise ValueError("prompt length 必须在 [0, seq_len]")
+        # 同时保留 labels 原有的 -100（例如 padding），不修改调用者数据。
+        positions = torch.arange(labels.shape[1], device=labels.device)
+        masked_labels = labels.masked_fill(positions[None, :] < prompt_lengths[:, None], -100)
+        return causal_lm_loss(logits, masked_labels)

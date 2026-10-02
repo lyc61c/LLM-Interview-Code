@@ -7,6 +7,7 @@ DPO 是一种不使用奖励模型的 RLHF 替代方案。
 参考论文: Direct Preference Optimization: Your Language Model is Secretly a Reward Model
 """
 
+import math
 import torch
 import torch.nn.functional as F
 
@@ -33,6 +34,18 @@ def dpo_loss(policy_chosen_logps, policy_rejected_logps,
     Returns:
         loss: DPO 损失值（标量）
     """
+    values = (policy_chosen_logps, policy_rejected_logps, ref_chosen_logps, ref_rejected_logps)
+    if policy_chosen_logps.ndim != 1 or policy_chosen_logps.numel() == 0:
+        raise ValueError("logps 必须为非空 [batch_size]，是已聚合的序列 log 概率")
+    for value in values:
+        if value.shape != policy_chosen_logps.shape or value.device != policy_chosen_logps.device:
+            raise ValueError("四个 logps 必须形状相同且位于同一设备")
+        if not value.is_floating_point() or not torch.isfinite(value).all():
+            raise ValueError("logps 必须是有限的浮点张量")
+    if not math.isfinite(beta) or beta <= 0:
+        raise ValueError("beta 必须为正且有限")
+    if not math.isfinite(label_smoothing) or not 0 <= label_smoothing <= 1:
+        raise ValueError("label_smoothing 必须在 [0,1]")
     # 步骤1: 计算对数比率（隐式奖励）
     # chosen_ratio = log(π_θ(y_w|x) / π_ref(y_w|x))
     chosen_ratio = policy_chosen_logps - ref_chosen_logps

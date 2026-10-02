@@ -27,6 +27,8 @@ class RMSNorm(nn.Module):
 
     def __init__(self, model_dim, eps=1e-8):
         super().__init__()
+        if model_dim <= 0 or eps <= 0:
+            raise ValueError("model_dim 与 eps 必须为正")
         self.eps = eps
         self.gamma = nn.Parameter(torch.ones(model_dim))  # 可学习的缩放参数
 
@@ -42,14 +44,15 @@ class RMSNorm(nn.Module):
         """
         # 计算均方值
         # mean_square: [batch_size, seq_len, 1]
-        mean_square = x.float().pow(2).mean(-1, keepdim=True)
+        stats_x = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+        mean_square = stats_x.pow(2).mean(-1, keepdim=True)
 
         # 计算 1/sqrt(x)，即 RMS 的倒数
         # rsqrt: [batch_size, seq_len, 1]
         rsqrt = torch.rsqrt(mean_square + self.eps)
 
         # 归一化
-        return x.float() * rsqrt
+        return stats_x * rsqrt
 
     def forward(self, x):
         """
@@ -62,7 +65,9 @@ class RMSNorm(nn.Module):
             归一化后的张量 [batch_size, seq_len, model_dim]
         """
         # x: [batch_size, seq_len, model_dim]
+        if not x.is_floating_point() or x.ndim == 0 or x.shape[-1] != self.gamma.numel():
+            raise ValueError("x 必须是最后一维为 model_dim 的浮点张量")
         normed_x = self._norm(x)
 
         # 恢复原始数据类型并应用缩放参数
-        return normed_x.type_as(x) * self.gamma
+        return (normed_x * self.gamma).to(x.dtype)

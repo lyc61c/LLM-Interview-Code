@@ -13,19 +13,18 @@ RoPE 注意力的主干流程，未实现原论文中的共享解耦 RoPE Key、
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from position.RotaryEmbedding import RotaryEmbedding
+from attention.ScaledDotProductAttention import scaled_dot_product_attention, zero_fully_masked_queries
 
 
 class MultiLatentAttention(nn.Module):
     """
     简化版多头潜在注意力模块
 
-    通过低秩投影将 Q 和 KV 压缩到潜在空间，显著减少 KV 缓存的显存占用。
+    通过低秩投影将 Q 和 KV 压缩到潜在空间，演示压缩表示的张量变换。
     同时结合 RoPE 位置编码保持位置感知能力。
 
     注意：这里为了突出核心张量变换，为每个头生成 RoPE Key。DeepSeek-V2
@@ -42,7 +41,12 @@ class MultiLatentAttention(nn.Module):
 
     def __init__(self, model_dim, num_heads, head_dim, latent_dim, rope_dim, dropout_p=0.0):
         super().__init__()
-        assert model_dim % num_heads == 0, "model_dim must be divisible by num_heads"
+        if any(not isinstance(n, int) or n <= 0 for n in (model_dim, num_heads, head_dim, latent_dim, rope_dim)):
+            raise ValueError("all dimensions must be positive integers")
+        if model_dim % num_heads != 0:
+            raise ValueError("model_dim must be divisible by num_heads")
+        if rope_dim % 2 != 0:
+            raise ValueError("rope_dim must be even")
 
         self.model_dim = model_dim
         self.num_heads = num_heads
@@ -72,11 +76,14 @@ class MultiLatentAttention(nn.Module):
 
         Args:
             x: 输入张量 [batch_size, seq_len, model_dim]
-            mask: 注意力掩码，用于屏蔽某些位置 [batch_size, num_heads, seq_len, seq_len] 或 [1, 1, seq_len, seq_len]
+            mask: True/1 允许注意，False/0 屏蔽；可广播到 [B,H,T,T]。
+                  全屏蔽 query 的输出为零。默认不自动添加 causal mask。
 
         Returns:
             输出张量 [batch_size, seq_len, model_dim]
         """
+        if not isinstance(x, torch.Tensor) or x.ndim != 3 or x.shape[-1] != self.model_dim or x.shape[1] == 0:
+            raise ValueError("x must have shape [batch, seq_len, model_dim]")
         batch_size, seq_len, _ = x.size()
 
         # ========== KV 投影 ==========
@@ -111,29 +118,19 @@ class MultiLatentAttention(nn.Module):
         # ========== 合并内容和 RoPE 部分 ==========
         # [batch_size, seq_len, num_heads, head_dim + rope_dim]
         q = torch.cat([q_content, q_rope], dim=-1)
-        q.transpose_(1, 2)  # [batch_size, num_heads, seq_len, head_dim + rope_dim]
+        q = q.transpose(1, 2)  # [batch_size, num_heads, seq_len, head_dim + rope_dim]
 
         # [batch_size, seq_len, num_heads, head_dim + rope_dim]
         k = torch.cat([k_content, k_rope], dim=-1)
-        k.transpose_(1, 2)  # [batch_size, num_heads, seq_len, head_dim + rope_dim]
+        k = k.transpose(1, 2)  # [batch_size, num_heads, seq_len, head_dim + rope_dim]
 
         # [batch_size, num_heads, seq_len, head_dim]
         v = v_content.transpose(1, 2)
 
         # ========== 缩放点积注意力 ==========
-        # scores: [batch_size, num_heads, seq_len, seq_len]
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim + self.rope_dim)
-
-        # 应用注意力掩码
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
-
-        # attn_weights: [batch_size, num_heads, seq_len, seq_len]
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-
-        # context: [batch_size, num_heads, seq_len, head_dim]
-        context = torch.matmul(attn_weights, v)
+        # Q/K 的维度为 head_dim + rope_dim，V 的维度仍为 head_dim。
+        # 缩放因子必须按 Q/K 的总维度计算，不能只用内容维度。
+        context, _ = scaled_dot_product_attention(q, k, v, mask, self.dropout)
 
         # [batch_size, num_heads, seq_len, head_dim] -> [batch_size, seq_len, num_heads * head_dim]
         output = context.transpose(1, 2).contiguous().view(batch_size, seq_len, self.num_heads * self.head_dim)
@@ -141,4 +138,4 @@ class MultiLatentAttention(nn.Module):
         # [batch_size, seq_len, num_heads * head_dim] -> [batch_size, seq_len, model_dim]
         output = self.o_proj(output)
 
-        return output
+        return zero_fully_masked_queries(output, mask, self.num_heads, seq_len)

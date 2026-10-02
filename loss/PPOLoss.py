@@ -8,8 +8,6 @@ PPO 是一种基于置信域的策略梯度算法，通过截断重要性采样�
 """
 
 import torch
-import numpy as np
-import matplotlib.pyplot as plt
 
 
 def ppo_clip_loss(old_log_probs, new_log_probs, advantages, clip_epsilon=0.2):
@@ -58,6 +56,10 @@ def plot_ppo_clip():
 
     展示 PPO 在不同优势值下如何限制策略更新的幅度。
     """
+    # 绘图库是可选依赖，仅显式调用示例时加载。
+    import numpy as np
+    import matplotlib.pyplot as plt
+
     # 设定 r 的范围 (0 到 2)
     r = np.linspace(0, 2, 200)
     epsilon = 0.2
@@ -115,5 +117,5 @@ def plot_ppo_clip():
     plt.show()
 
 
-# 运行绘图
-plot_ppo_clip()
+if __name__ == "__main__":
+    plot_ppo_clip()
