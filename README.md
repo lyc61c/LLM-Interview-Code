@@ -1,60 +1,21 @@
 # LLM 面试手撕代码大全
 
-> 大模型面试必备：从注意力机制到强化学习，从零实现核心组件
-
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)]()
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)]()
-
-本地增补版基于 [ckd0817/LLM-Interview-Code](https://github.com/ckd0817/LLM-Interview-Code)
-的 `820ce2b`，对照 [AIR-hl/llm-interview-code](https://github.com/AIR-hl/llm-interview-code)
-的题目范围补齐实现，并增加数值、梯度和边界测试。
-
-## 快速开始
-
-在仓库根目录执行，Python 3.10+。Windows PowerShell：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m examples.quickstart
-```
-
-Linux / macOS 可将上述 Python 路径替换为 `.venv/bin/python`。
-核心依赖只有 PyTorch；BPE 与工具调用解析使用 Python 标准库。
-PPO 绘图示例需要另外安装 `matplotlib`，导入损失函数时不需要它。
-
-按练习顺序阅读 [手撕题学习清单](docs/INTERVIEW_GUIDE.md)，新增范围见下表。
-
-| 主题 | 实现入口 | 本次补充 |
-|---|---|---|
-| 缓存注意力 | [MultiHeadAttentionWithKVCache.py](attention/MultiHeadAttentionWithKVCache.py) | prefill、逐 token / 分块 decode、RoPE offset |
-| 掩码 | [AttentionMask.py](attention/AttentionMask.py) | padding、causal、缓存位置偏移与合并 |
-| 线性层 | [Linear.py](components/Linear.py) | 手写参数、矩阵乘与 bias |
-| 激活 | [Activation.py](components/Activation.py) | 手写 Sigmoid、SiLU |
-| BPE | [BPE.py](tokenizer/BPE.py) | byte-level 合并训练、编码与解码 |
-| 对比学习 | [InfoNCELoss.py](loss/InfoNCELoss.py) | 批内负样本、温度与对称损失 |
-| 量化 | [Quantization.py](components/Quantization.py) | 对称 / 非对称 INT8、反量化、常量边界 |
-| 生成采样 | [Sampling.py](generation/Sampling.py) | greedy、temperature、top-k、top-p |
-| 工具调用 | [ToolCallParser.py](tools/ToolCallParser.py) | 交错流事件、增量 JSON 参数解析 |
-| DAPO | [DAPOLoss.py](loss/DAPOLoss.py) | 非对称 clipping、有效 token 归一化 |
-| GSPO | [GSPOLoss.py](loss/GSPOLoss.py) | 序列级比率与 clipping |
-| KL 估计 | [KLDivergence.py](loss/KLDivergence.py) | k1 / k2 / k3 采样估计 |
-| 交叉熵 | [EntropyLoss.py](loss/EntropyLoss.py) | 硬标签、软标签与数值稳定性 |
-
-本仓库是教学实现。DAPO / GSPO 文件覆盖损失核心，DAPO 的动态采样、
-超长样本处理等训练系统功能需结合原论文和框架实现。
+> 从基础算子到注意力、训练损失与生成：公式、张量形状和 PyTorch 实现。
 
 ## 目录
 
-- [项目简介](#项目简介)
-- [项目结构](#项目结构)
+- [基础算子](#基础算子)
+  - [Linear](#linear)
+  - [Sigmoid 与 SiLU](#sigmoid-与-silu)
+  - [Softmax 与 LogSoftmax](#softmax-与-logsoftmax)
+  - [PyTorch 张量操作](#pytorch-张量操作)
 - [注意力机制](#注意力机制)
   - [Scaled Dot-Product Attention](#scaled-dot-product-attention)
   - [Multi-Head Attention](#multi-head-attention)
   - [Group Query Attention](#group-query-attention)
-  - [Multi-Latent Attention](#multi-latent-attention)
+  - [Multi-Head Latent Attention (MLA)](#multi-head-latent-attention-mla)
+  - [Attention Mask](#attention-mask)
+  - [KV Cache](#kv-cache)
 - [归一化层](#归一化层)
   - [LayerNorm](#layernorm)
   - [RMSNorm](#rmsnorm)
@@ -65,130 +26,102 @@ PPO 绘图示例需要另外安装 `matplotlib`，导入损失函数时不需要
   - [SwiGLU](#swiglu)
   - [Mixture of Experts](#mixture-of-experts)
 - [损失函数](#损失函数)
+  - [Cross Entropy](#cross-entropy)
   - [Pretrain Loss](#pretrain-loss)
   - [SFT Loss](#sft-loss)
+  - [InfoNCE Loss](#infonce-loss)
   - [DPO Loss](#dpo-loss)
   - [PPO Loss](#ppo-loss)
   - [GRPO Loss](#grpo-loss)
-  - [DAPO / GSPO / InfoNCE / KL](#新增损失函数)
+  - [DAPO Loss](#dapo-loss)
+  - [GSPO Loss](#gspo-loss)
+  - [KL Divergence](#kl-divergence)
 - [参数高效微调](#参数高效微调)
   - [LoRA](#lora)
+- [分词](#分词)
+  - [Byte-level BPE](#byte-level-bpe)
+- [量化](#量化)
+  - [INT8 量化](#int8-量化)
+- [生成](#生成)
+  - [生成采样](#生成采样)
+- [工具调用](#工具调用)
+  - [流式参数解析](#流式参数解析)
 - [参考文献](#参考文献)
 
-## 项目简介
+## 基础算子
 
-本项目收录了大语言模型（LLM）面试中高频出现的手撕代码实现，涵盖：
+### Linear
 
-- **注意力机制**：MHA、GQA、MLA 等现代注意力变体
-- **归一化层**：LayerNorm、RMSNorm
-- **位置编码**：RoPE 旋转位置编码
-- **前馈网络**：FFN、SwiGLU、MoE
-- **损失函数**：Pretrain、SFT、DPO、PPO、GRPO 等训练损失
-- **参数高效微调**：LoRA
+线性层对最后一维做仿射变换，前导维度保持不变：
 
-**项目特色**：
-- 使用 PyTorch 核心算子实现，不依赖 Transformers 等高层组件
-- 详细注释，张量形状图解
-- 公式推导，原理解析
-- 对照参考实现检查数值与梯度，验证缓存解码与边界输入
+$$y=xW^T+b$$
 
----
+`weight` 的形状为 `[out_features, in_features]`，输入 `[..., in_features]`，
+输出 `[..., out_features]`。手写时用 `nn.Parameter` 注册权重与可选 bias，
+矩阵乘法使用 `x @ weight.T`，bias 通过广播加到每个位置。
 
-## 写给深度学习初学者
+**代码：[Linear.py](components/Linear.py)**
 
-初学深度学习时，我常感到困惑：为什么对相同的张量做同样的操作，得到的结果却不同？比如 Q、K、V 三个矩阵的形成过程，代码完全一致，却产生不同的表达。
+### Sigmoid 与 SiLU
 
-后来我逐渐理解：**张量操作的代码是相同的，但运行时权重矩阵的参数不同**。这些参数的更新由反向传播自动完成，我们无法直接控制。如果想深入了解参数是如何形成的，需要学习反向传播的原理。我们能做的是学会正确操作张量，设计合理的计算图，让反向传播按照预期方向更新参数。
+Sigmoid 将输入映射到 $(0,1)$；SiLU 用 Sigmoid 为输入提供平滑门控：
 
-仔细观察这些代码，你会发现**它们大多是在进行维度变化和对齐的操作**——reshape、transpose、expand、concatenate……掌握这些操作，就能理解数据在网络中是如何流动的。
+$$\sigma(x)=\frac{1}{1+e^{-x}},\qquad \mathrm{SiLU}(x)=x\sigma(x)$$
 
-因此，练习这些 LLM 组件时，需要同时理解张量操作、数学定义和梯度流向。
-能够写出正确的形状变换，还要解释 mask、归一化、损失缩放与数值稳定性，
-并通过小样本检验实现。**张量操作是理解这一切的基础**。
+直接计算 `exp(-x)` 会在很大的负输入上溢出。稳定实现按符号分支：
+非负输入使用 $1/(1+e^{-x})$，负输入使用 $e^x/(1+e^x)$。
+两条分支都要避免计算危险的指数；零点处 Sigmoid 的导数为 $1/4$，
+SiLU 的导数为 $1/2$。FP16 / BF16 输入先提升到 FP32 计算。
 
-为此，我专门准备了一个教程：[PyTorch 张量变换与重塑教程](pytorch_tensor_reshape.ipynb)
+**代码：[Activation.py](components/Activation.py)**
 
----
+### Softmax 与 LogSoftmax
 
-## 项目结构
+Softmax 把 logits 转成概率分布。减去最大值不会改变结果，但能避免指数溢出：
 
-```
-LLM-Interview-Code/
-├── attention/                     # 注意力机制
-│   ├── ScaledDotProductAttention.py
-│   ├── MultiHeadAttention.py
-│   ├── GroupQueryAttention.py
-│   ├── MultiLatentAttention.py
-│   ├── MultiHeadAttentionWithKVCache.py
-│   └── AttentionMask.py
-├── components/                    # 从零实现的基础组件
-│   ├── Linear.py
-│   ├── Activation.py
-│   └── Quantization.py
-├── normalization/                 # 归一化层
-│   ├── LayerNorm.py
-│   └── RMSNorm.py
-├── position/                      # 位置编码
-│   └── RotaryEmbedding.py
-├── ffn/                           # 前馈网络
-│   ├── FFN.py
-│   ├── SwiGLUFFN.py
-│   └── MoE.py
-├── loss/                          # 损失函数
-│   ├── SFTLoss.py
-│   ├── DPOLoss.py
-│   ├── PPOLoss.py
-│   ├── GRPOLoss.py
-│   ├── PretainLoss.py
-│   ├── EntropyLoss.py
-│   ├── InfoNCELoss.py
-│   ├── KLDivergence.py
-│   ├── DAPOLoss.py
-│   └── GSPOLoss.py
-├── peft/                          # 参数高效微调
-│   └── LoRALinear.py
-├── tokenizer/BPE.py               # byte-level BPE
-├── generation/Sampling.py         # 生成采样
-├── tools/ToolCallParser.py         # 工具调用流式解析
-├── examples/quickstart.py          # 可运行的练习示例
-├── tests/                         # 数值、梯度和回归验证
-├── docs/INTERVIEW_GUIDE.md         # 练习顺序、公式与关键边界
-├── requirements.txt
-├── requirements-dev.txt
-├── pyproject.toml
-├── pytorch_tensor_reshape.ipynb   # PyTorch 张量操作教程
-└── README.md
-```
+$$m=\max_j z_j,\qquad p_i=\frac{e^{z_i-m}}{\sum_j e^{z_j-m}}$$
 
----
+LogSoftmax 应直接使用 Log-Sum-Exp，避免概率下溢后再取对数：
+
+$$\log p_i=z_i-m-\log\sum_j e^{z_j-m}$$
+
+本实现沿最后一维计算，支持任意前导维度。`-inf` 可表示被排除的类别；
+NaN、`+inf` 或整行都是 `-inf` 时无法定义有效分布，会报错。
+
+**代码：[EntropyLoss.py](loss/EntropyLoss.py)**
+
+### PyTorch 张量操作
+
+注意力中的分头、换轴和合头依赖 `reshape`、`view`、`transpose`、`permute`。
+`view` 受张量步长与连续性约束；`reshape` 在需要时会复制数据。
+例如 `[B,T,D]` 分成 `[B,T,H,d]` 后换轴为 `[B,H,T,d]`，其中 $D=Hd$；
+合头时先恢复轴顺序，再重排为 `[B,T,D]`。
+
+Q、K、V 即使采用相同的计算流程，也会因为投影权重不同而产生不同表示。
+下方 Notebook 介绍张量形状、内存布局和常见变换。
+
+**代码：[pytorch_tensor_reshape.ipynb](pytorch_tensor_reshape.ipynb)**
+
 
 ## 注意力机制
 
-> **实现说明**
-> 本仓库里的注意力模块默认使用 `dropout_p=0.0`，更贴近近两年主流 decoder-only LLM 的常见配置。
-> 如果你是为了讲解经典 Transformer 正则化，或者在小数据训练中想显式增加随机性，可以手动传入非零 dropout。
-
-本仓库 attention mask 统一约定为 **True / 1 = 允许注意，False / 0 = 屏蔽**。
-缓存解码时 query 的绝对位置从 `past_len` 开始，不能直接套用从零开始的方形下三角 mask。
-
 ### Scaled Dot-Product Attention
 
-#### 背景与动机
+缩放点积注意力根据 Query 与 Key 的相似度，为 Value 计算加权和：
 
-缩放点积注意力（Scaled Dot-Product Attention）是所有注意力机制的基础。它计算 Query 和 Key 的点积，除以缩放因子后通过 softmax 得到注意力权重，最后加权求和 Value。
+$$\mathrm{Attention}(Q,K,V)=\mathrm{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V$$
 
-这是理解多头注意力的前提，也是面试中最常考的基础版本。
+输入 Q 为 `[B,H,Q,d_k]`，K 为 `[B,H,K,d_k]`，V 为 `[B,H,K,d_v]`；
+分数矩阵为 `[B,H,Q,K]`，softmax 沿 key 轴计算，输出为 `[B,H,Q,d_v]`。
+在各维近似独立、零均值且单位方差时，点积方差随 $d_k$ 增长，
+除以 $\sqrt{d_k}$ 可避免 softmax 过早饱和。
 
-#### 核心公式
+mask 中 **True / 1 表示允许注意，False / 0 表示屏蔽**。
+全屏蔽行的输出为零，避免对全 `-inf` 分数做 softmax 产生 NaN。
+FP16 / BF16 的点积与归一化使用 FP32 计算。
 
-$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V$$
-
-**为什么需要缩放？**
-- 当 $d_k$ 较大时，点积结果也会很大
-- 过大的值进入 softmax 后会导致梯度消失
-- 除以 $\sqrt{d_k}$ 使方差稳定在 1 附近
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -202,23 +135,25 @@ flowchart TD
     WeightedSum --> Output["输出: [batch, num_heads, seq_len, head_dim]"]
 ```
 
----
+</details>
+
+**代码：[ScaledDotProductAttention.py](attention/ScaledDotProductAttention.py)**
 
 ### Multi-Head Attention
 
-#### 背景与动机
+多头注意力把输入投影到多个子空间，每个头独立计算注意力，再拼接并做输出投影：
 
-多头注意力（Multi-Head Attention, MHA）通过将输入映射到多个子空间并行计算注意力，模型可以同时关注不同位置的不同表示子空间信息。
+$$\mathrm{MHA}(Q,K,V)=\mathrm{Concat}(\mathrm{head}_1,\ldots,\mathrm{head}_H)W^O$$
 
-每个头学习不同的注意力模式，最后拼接并通过输出投影融合。
+$$\mathrm{head}_i=\mathrm{Attention}(QW_i^Q,KW_i^K,VW_i^V)$$
 
-#### 核心公式
+`model_dim` 必须能被 `num_heads` 整除。输入 `[B,T,D]` 经投影、分头得到
+`[B,H,T,D/H]`，合头后恢复 `[B,T,D]`。
+`forward(x_query, x_context=None, mask=None)` 中，未传 `x_context` 时执行自注意力，
+传入时执行交叉注意力。因果约束由调用者通过 mask 提供，`dropout_p` 默认是 0。
 
-$$\text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, ..., \text{head}_h)W^O$$
-
-其中 $\text{head}_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)$
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -229,46 +164,39 @@ flowchart TD
     WQ --> Q0["Q<br/>[batch, seq_len, model_dim]"]
     WK --> K0["K<br/>[batch, seq_len, model_dim]"]
     WV --> V0["V<br/>[batch, seq_len, model_dim]"]
-    Q0 --> RQ["reshape"] --> Q["Q<br/>[batch, num_heads, seq_len, head_dim]"]
-    K0 --> RK["reshape"] --> K["K<br/>[batch, num_heads, seq_len, head_dim]"]
-    V0 --> RV["reshape"] --> V["V<br/>[batch, num_heads, seq_len, head_dim]"]
+    Q0 --> RQ["reshape + transpose(1,2)"] --> Q["Q<br/>[batch, num_heads, seq_len, head_dim]"]
+    K0 --> RK["reshape + transpose(1,2)"] --> K["K<br/>[batch, num_heads, seq_len, head_dim]"]
+    V0 --> RV["reshape + transpose(1,2)"] --> V["V<br/>[batch, num_heads, seq_len, head_dim]"]
     Q --> Attention["Scaled Dot-Product Attention"]
     K --> Attention
     V --> Attention
     Attention --> Context["[batch, num_heads, seq_len, head_dim]"]
-    Context --> Concat["reshape (concat heads)"]
+    Context --> Concat["transpose(1,2) + reshape (concat heads)"]
     Concat --> ConcatShape["[batch, seq_len, model_dim]"]
     ConcatShape --> WO["W_o (output projection)"]
     WO --> Output["输出: [batch, seq_len, model_dim]"]
 ```
 
----
+</details>
+
+**代码：[MultiHeadAttention.py](attention/MultiHeadAttention.py)**
 
 ### Group Query Attention
 
-#### 背景与动机
+分组查询注意力让多个 Query 头共享一组 K/V，以减少 K/V 投影与缓存大小。
+设 Query 有 $H$ 个头，K/V 有 $G$ 个头，要求 $H$ 能被 $G$ 整除：
 
-分组查询注意力（Grouped Query Attention, GQA）是 MHA 和 Multi-Query Attention (MQA) 的折中方案。在 GQA 中，Query 有 H 个头，而 Key 和 Value 只有 G 个头（G < H），多组 Query 共享同一组 K/V。
+| 类型 | Q 头数 | K/V 头数 | 相同头维度下的 KV 存储比例 |
+|---|---|---|---|
+| MHA | $H$ | $H$ | $1$ |
+| GQA | $H$ | $G$ | $G/H$ |
+| MQA | $H$ | $1$ | $1/H$ |
 
-这显著减少了 KV Cache 的显存占用，同时保持了较好的模型质量。LLaMA 2、LLaMA 3 等模型都采用了 GQA。
+本实现把 `[B,G,T,d]` 的 K/V 按组扩展为 `[B,H,T,d]`，
+随后复用缩放点积注意力。每组 Query 共享 K/V，但各自的 Query 和注意力权重仍然不同。
 
-**对比**：
-| 类型 | Q 头数 | K 头数 | V 头数 | KV Cache |
-|------|--------|--------|--------|----------|
-| MHA | H | H | H | 100% |
-| GQA | H | G | G | G/H × 100% |
-| MQA | H | 1 | 1 | 1/H × 100% |
-
-#### 核心公式
-
-与 MHA 相同，但 K、V 需要通过 `repeat_kv` 扩展到与 Q 相同的头数：
-
-```
-K_expanded = repeat(K, num_heads // num_kv_heads)
-V_expanded = repeat(V, num_heads // num_kv_heads)
-```
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -287,35 +215,26 @@ flowchart TD
     Attention --> Output["输出: [batch, seq_len, model_dim]"]
 ```
 
----
+</details>
 
-### Multi-Latent Attention
+**代码：[GroupQueryAttention.py](attention/GroupQueryAttention.py)**
 
-> **实现说明**
-> `MultiLatentAttention.py` 是用于讲解核心张量变换的简化版 MLA：保留 Q/KV
-> 低秩投影与 RoPE 注意力主线，但未实现原论文中的共享解耦 RoPE Key、
-> 投影吸收和增量 KV Cache 接口。
+### Multi-Head Latent Attention (MLA)
 
-#### 背景与动机
+多头潜在注意力通过低秩投影构造 Q、K、V 的中间表示。
+KV 路径先下投影到潜空间，再上投影恢复注意力所需的特征：
 
-多潜变量注意力（Multi-Latent Attention, MLA）由 DeepSeek-V2 提出，通过将 KV 压缩到低维潜空间来大幅减少 KV Cache。与 GQA 不同，MLA 不是通过减少头数，而是通过降维压缩来实现内存节省。
+$$c_{KV}=W_{DKV}h_t,\qquad [k_t,v_t]=W_{UKV}c_{KV}$$
 
-**核心思想**：
-- KV 先通过下投影压缩到潜空间（存入 Cache）
-- 计算注意力时再上投影恢复
-- 压缩比可达 90%+，同时保持性能
+本文件是用于理解张量变换的简化实现：包含 Q/KV 的下投影与上投影，
+以及内容特征和 RoPE 特征的拆分、拼接。Q/K 的点积维度为
+`head_dim + rope_dim`，V 的头维度为 `head_dim`。
 
-#### 核心公式
+原论文中的共享解耦 RoPE Key、投影吸收和增量潜变量缓存未在此实现；
+该文件中的低维中间表示不能直接视为已实现的 KV Cache。
 
-**KV 压缩**（下投影到潜空间）：
-
-$$c_{KV} = W_{DKV} \cdot h_t$$
-
-**KV 恢复**（上投影恢复 K、V）：
-
-$$[k_{t}, v_{t}] = W_{UKV} \cdot c_{KV}$$
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -323,7 +242,7 @@ flowchart TD
     X --> KVPath["KV路径"]
     X --> QPath["Q路径"]
     KVPath --> KVDown["kv_down"]
-    KVDown --> KVLatent["[batch, seq_len, latent_dim]<br/>存入 KV Cache"]
+    KVDown --> KVLatent["[batch, seq_len, latent_dim]<br/>低维中间表示"]
     KVLatent --> KVUp["kv_up"]
     KVUp --> KV["[K, V]"]
     QPath --> QDown["q_down"]
@@ -335,59 +254,112 @@ flowchart TD
     Attention --> Output["输出: [batch, seq_len, model_dim]"]
 ```
 
----
+</details>
+
+**代码：[MultiLatentAttention.py](attention/MultiLatentAttention.py)**
+
+### Attention Mask
+
+Padding mask 屏蔽补齐位置，causal mask 屏蔽未来位置。合并时使用逻辑与，
+形状 `[B,1,Q,K]` 可广播到所有注意力头。本仓库统一使用
+**True / 1 = 允许注意，False / 0 = 屏蔽**。
+
+```python
+import torch
+from attention.AttentionMask import create_attention_mask
+
+input_ids = torch.tensor([[11, 12, 13, 0]])
+allowed = create_attention_mask(input_ids, pad_token_id=0)
+# [B, 1, Q, K]：屏蔽未来 token、padding key 和 padding query。
+```
+
+缓存解码时，Query 的绝对位置从 `past_len` 开始，允许条件是：
+
+$$k_{position}\le past\_len+q_{position}$$
+
+例如已缓存 3 个 token，本轮输入 2 个 token，则 mask 为 `Q=2, K=5`：
+第一行允许前 4 个 key，第二行允许全部 5 个 key。
+`create_attention_mask` 的 `input_ids` 应包含历史与当前输入，
+`query_len` 表示本轮长度，`past_len` 表示缓存长度。
+默认同时屏蔽 padding query；可通过 `mask_query_padding=False` 只屏蔽 padding key。
+
+**代码：[AttentionMask.py](attention/AttentionMask.py)**
+
+### KV Cache
+
+自回归生成时，旧 token 的 K/V 不变。缓存它们后，每轮只计算新 token 的 Q/K/V，
+再把新 K/V 沿序列维追加到缓存，避免重复投影历史 token。
+
+`forward(x, past_key_value=None, mask=None)` 返回 `(output, (K, V))`，
+缓存形状为 `[B,H,T,d]`。支持首轮 prefill、逐 token decode 和分块 decode，
+内部自动构造带位置偏移的因果 mask。
+
+```python
+import torch
+from attention.MultiHeadAttentionWithKVCache import MultiHeadAttentionWithKVCache
+
+model = MultiHeadAttentionWithKVCache(model_dim=8, num_heads=2).eval()
+x = torch.randn(1, 4, 8)
+with torch.no_grad():
+    full, _ = model(x)
+    first, cache = model(x[:, :3])
+    last, cache = model(x[:, 3:], past_key_value=cache)
+    torch.testing.assert_close(torch.cat([first, last], dim=1), full)
+```
+
+缓存中的 K 已应用其位置的 RoPE；追加时仅旋转本轮新 Q/K，
+位置偏移设为历史长度，旧 K 不再旋转。
+
+**代码：[MultiHeadAttentionWithKVCache.py](attention/MultiHeadAttentionWithKVCache.py)**
+
 
 ## 归一化层
 
 ### LayerNorm
 
-#### 背景与动机
+LayerNorm 对每个位置的特征维度归一化，不依赖 batch 内的其他样本：
 
-层归一化（Layer Normalization）在每个样本的特征维度上进行归一化，使得训练更加稳定。与 BatchNorm 不同，LayerNorm 不依赖 batch size，因此更适合序列模型和 Transformer。
+$$\mu=\frac1d\sum_i x_i,\qquad \sigma^2=\frac1d\sum_i(x_i-\mu)^2$$
 
-#### 核心公式
+$$\mathrm{LN}(x)=\gamma\frac{x-\mu}{\sqrt{\sigma^2+\epsilon}}+\beta$$
 
-$$\text{LN}(x) = \gamma \cdot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta$$
+输入和输出均为 `[..., d]`，均值与方差保持最后一维为 1，以便广播。
+方差使用总体方差，即 `unbiased=False`；$\gamma$ 和 $\beta$ 分别是可学习的缩放与偏移。
+FP16 / BF16 的统计量在 FP32 中计算，FP64 输入保留双精度。
 
-其中：
-- $\mu = \frac{1}{d}\sum_{i=1}^{d} x_i$ （均值）
-- $\sigma^2 = \frac{1}{d}\sum_{i=1}^{d} (x_i - \mu)^2$ （方差）
-- $\gamma, \beta$：可学习的缩放和偏移参数
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
     X["输入 x: [batch, seq_len, model_dim]"]
     X --> Mean["mean(x, dim=-1)"]
     Mean --> MeanShape["[batch, seq_len, 1]"]
-    MeanShape --> Var["var(x, dim=-1)"]
+    X --> Var["var(x, dim=-1, unbiased=False)"]
     Var --> VarShape["[batch, seq_len, 1]"]
     VarShape --> Normalize["(x - mean) / sqrt(var + eps)"]
+    MeanShape --> Normalize
     X --> Normalize
     Normalize --> NormShape["[batch, seq_len, model_dim]"]
     NormShape --> Affine["x * gamma + beta"]
     Affine --> Output["输出: [batch, seq_len, model_dim]"]
 ```
 
----
+</details>
+
+**代码：[LayerNorm.py](normalization/LayerNorm.py)**
 
 ### RMSNorm
 
-#### 背景与动机
+RMSNorm 用均方根缩放特征，不减去均值：
 
-均方根归一化（Root Mean Square Normalization）是 LayerNorm 的简化版本。它移除了均值计算，只使用 RMS 进行归一化。这种方法计算更快，且在很多 LLM（如 LLaMA、Mistral）中表现优异。
+$$\mathrm{RMSNorm}(x)=\gamma\frac{x}{\sqrt{\frac1d\sum_i x_i^2+\epsilon}}$$
 
-#### 核心公式
+与 LayerNorm 相比，它省去中心化步骤，只使用可学习缩放 $\gamma$，不包含偏移 $\beta$。
+输入与输出形状相同；FP16 / BF16 统计量提升到 FP32，FP64 输入保留双精度。
 
-$$\text{RMSNorm}(x) = \gamma \cdot \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}}$$
-
-**与 LayerNorm 的区别**：
-- 不计算均值（去中心化）
-- 只有一个可学习参数 $\gamma$（无 $\beta$）
-- 计算量更少，推理更快
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -399,71 +371,40 @@ flowchart TD
     Scale --> Output["输出: [batch, seq_len, model_dim]"]
 ```
 
----
+</details>
+
+**代码：[RMSNorm.py](normalization/RMSNorm.py)**
+
 
 ## 位置编码
 
 ### Rotary Position Embedding (RoPE)
 
-#### 背景与动机
+RoPE 将位置信息编码为 Q/K 特征对的旋转。位置 $m$、频率 $\theta_i$ 的变换为：
 
-旋转位置编码（RoPE）通过旋转向量的方式注入位置信息，具有以下优势：
-- **相对位置感知**：自动捕捉 token 之间的相对位置关系
-- **外推能力**：可以处理比训练时更长的序列
-- **计算高效**：通过逐元素乘法实现
+$$\begin{aligned}
+x_1'&=x_1\cos(m\theta_i)-x_2\sin(m\theta_i)\\
+x_2'&=x_1\sin(m\theta_i)+x_2\cos(m\theta_i)
+\end{aligned}$$
 
-目前被 LLaMA、Mistral、Qwen 等主流模型采用。
+$$\theta_i=10000^{-2i/d}$$
 
-#### 核心公式
+两个位置的旋转向量做点积时，旋转角度的差与相对位置有关。
+本实现按前后半区配对，使用 `x * cos + rotate_half(x) * sin`，
+其中 `rotate_half(x) = [-x后半, x前半]`，因此头维度必须为偶数。
 
-对于位置 $m$ 的向量 $x$，RoPE 将其旋转：
+`forward(xq, xk, offset=0)` 接收 `[B,T,H,d]` 的 Q/K。
+缓存解码使用 `offset=past_len`，频率表按需要扩展。
+能够计算更大位置上的旋转，不代表模型在超出训练长度后仍能保持质量。
 
-```math
-\begin{bmatrix}
-x_1' \\
-x_2'
-\end{bmatrix}
-=
-\begin{bmatrix}
-\cos(m\theta) & -\sin(m\theta) \\
-\sin(m\theta) & \cos(m\theta)
-\end{bmatrix}
-\cdot
-\begin{bmatrix}
-x_1 \\
-x_2
-\end{bmatrix}
-```
-
-展开形式：
-
-$$x_1' = x_1 \cos(m\theta) - x_2 \sin(m\theta)$$
-
-$$x_2' = x_1 \sin(m\theta) + x_2 \cos(m\theta)$$
-
-其中 $\theta_i = 10000^{-2i/d}$
-
-#### 实现原理
-
-```
-位置 m 的旋转角度: θ_m = m * θ_base
-预计算 cos(m*θ) 和 sin(m*θ) 用于所有位置
-
-旋转公式:
-[x1', x2'] = [x1*cos - x2*sin, x1*sin + x2*cos]
-
-等价于:
-x' = x * cos + rotate_half(x) * sin
-其中 rotate_half(x) = [-x后半, x前半]
-```
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
     QK["输入 Q, K: [batch, seq_len, num_heads, head_dim]"]
     Precompute["预计算 cos, sin: [max_seq_len, head_dim]"]
-    Precompute --> Slice["取当前序列长度: cos[:seq_len], sin[:seq_len]<br/>[1, seq_len, 1, head_dim]"]
+    Precompute --> Slice["取当前序列长度: cos[offset:offset+seq_len], sin[offset:offset+seq_len]<br/>[1, seq_len, 1, head_dim]"]
     QK --> Rotate["rotate_half(Q) = [-Q后半, Q前半]"]
     Slice --> Apply["Q_rotated = Q * cos + rotate_half(Q) * sin<br/>K_rotated = K * cos + rotate_half(K) * sin"]
     Rotate --> Apply
@@ -471,53 +412,52 @@ flowchart TD
     Apply --> Output["输出: [batch, seq_len, num_heads, head_dim]"]
 ```
 
----
+</details>
+
+**代码：[RotaryEmbedding.py](position/RotaryEmbedding.py)**
+
 
 ## 前馈网络
 
 ### FFN
 
-#### 背景与动机
+前馈网络在每个 token 位置上独立进行两次线性变换，加入非线性激活：
 
-前馈网络（Feed-Forward Network）是 Transformer 中注意力层之后的两层全连接网络，用于对特征进行非线性变换。它是 Transformer 中参数量最大的部分。
+$$\mathrm{FFN}(x)=W_2\mathrm{ReLU}(W_1x+b_1)+b_2$$
 
-#### 核心公式
+形状依次为 `[B,T,D] → [B,T,I] → [B,T,D]`，中间维度 $I$ 通常大于 $D$。
+本实现使用带 bias 的两层线性层，中间维度由 `intermediate_dim` 指定，常见取值为 `4 * model_dim`。
 
-$$\text{FFN}(x) = W_2 \cdot \text{ReLU}(W_1 x)$$
-
-通常 $d_{ff} = 4 \times d_{model}$
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
     X["输入 x: [batch, seq_len, model_dim]"]
     X --> W1["W_1 (up projection)"]
-    W1 --> Hidden["[batch, seq_len, 4*model_dim]"]
+    W1 --> Hidden["[batch, seq_len, intermediate_dim]"]
     Hidden --> ReLU["ReLU"]
     ReLU --> W2["W_2 (down projection)"]
     W2 --> Output["输出: [batch, seq_len, model_dim]"]
 ```
 
----
+</details>
+
+**代码：[FFN.py](ffn/FFN.py)**
 
 ### SwiGLU
 
-#### 背景与动机
+SwiGLU 用 SiLU 门控分支调节另一条特征分支，再通过下投影恢复模型维度：
 
-SwiGLU 是 GLU（Gated Linear Unit）变体之一，被 LLaMA、PaLM 等模型采用。相比标准 FFN，SwiGLU 引入门控机制和 Swish 激活函数，提升了模型性能。
+$$\mathrm{SwiGLU}(x)=W_{down}\left(\mathrm{SiLU}(W_{gate}x)\odot W_{up}x\right)$$
 
-#### 核心公式
+两条上投影分支均产生 `[B,T,I]`，逐元素相乘后下投影到 `[B,T,D]`。
+本实现有 gate、up、down 三个无 bias 矩阵。比较它与 FFN 的参数量时，
+应同时考虑中间维度：同样的 $I$ 下，SwiGLU 比双矩阵 FFN 多一个投影。
+忽略 bias，FFN 的 $I=4D$ 时参数量约为 $8D^2$；SwiGLU 取 $I\approx8D/3$ 可对齐参数量。
 
-$$\text{SwiGLU}(x) = W_{down}\left(\text{SiLU}(W_{gate}(x)) \odot W_{up}(x)\right)$$
-
-其中：
-- $\text{SiLU}(x) = x \cdot \sigma(x)$ （也称为 Swish）
-- $\odot$ 表示逐元素乘法
-
-**参数量对比**：标准 FFN 有 2 个矩阵，SwiGLU 有 3 个矩阵
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -534,26 +474,26 @@ flowchart TD
     WDown --> Output["输出: [batch, seq_len, model_dim]"]
 ```
 
----
+</details>
+
+**代码：[SwiGLUFFN.py](ffn/SwiGLUFFN.py)**
 
 ### Mixture of Experts
 
-#### 背景与动机
+MoE 通过 Router 为每个 token 选择少量专家，扩大总参数容量，同时控制激活计算量。
+设路由 logits 为 $g(x)$，选中的专家集合为 $S=\mathrm{TopK}(g(x))$：
 
-混合专家模型（Mixture of Experts, MoE）通过稀疏激活实现模型容量的极大扩展。每个 token 只激活部分专家网络，使得总参数量可以很大，但计算量保持可控。
+$$w_i=\frac{e^{g_i(x)}}{\sum_{j\in S}e^{g_j(x)}},\qquad
+\mathrm{MoE}(x)=\sum_{i\in S}w_iE_i(x)$$
 
-**核心思想**：
-- Router 决定每个 token 应该由哪些专家处理
-- Top-K 路由：每个 token 只激活 K 个专家
-- 专家输出按路由权重加权求和
+本实现先取 Top-k logits，再在选中专家之间做 softmax，权重和为 1。
+输入展平为 `[B*T,D]`，分派给专家后按权重累加，最后恢复 `[B,T,D]`。
+这里的 Top-k 是专家路由；生成采样中的 Top-k 则是在词表中筛选候选 token。
+当前归一化方式在 `top_k=1` 时权重恒为 1，任务损失对 Router 的梯度为零；
+训练这种路由配置需额外设计路由权重或辅助目标。
 
-代表模型：Mixtral 8x7B、DeepSeek-V2、GPT-4 等。
-
-#### 核心公式
-
-$$\text{MoE}(x) = \sum_{i \in \text{TopK}} \text{softmax}(\text{router}(x))_i \cdot E_i(x)$$
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -564,30 +504,50 @@ flowchart TD
     Router --> Logits["[batch*seq_len, num_experts]"]
     Logits --> TopK["Top-K"]
     TopK --> Softmax["softmax"]
-    Softmax --> Mask["mask"]
+    Softmax --> Mask["选中专家的归一化权重"]
     Experts --> ExpertOutput["expert_output"]
     Mask --> WeightedSum["weighted sum (按路由权重累加)"]
     ExpertOutput --> WeightedSum
     WeightedSum --> Output["输出 reshape: [batch, seq_len, model_dim]"]
 ```
 
----
+</details>
+
+**代码：[MoE.py](ffn/MoE.py)**
+
 
 ## 损失函数
 
+### Cross Entropy
+
+硬标签交叉熵取目标类别的负 log 概率；软标签交叉熵计算目标分布的加权和：
+
+$$\mathrm{CE}(z,y)=-\log\mathrm{softmax}(z)_y$$
+
+$$\mathrm{CE}(z,q)=-\sum_j q_j\log\mathrm{softmax}(z)_j$$
+
+`cross_entropy_loss(logits, targets, reduction="mean", ignore_index=-100)` 的
+logits 为 `[..., C]`。硬标签为 `[...]` 的整数类别索引，
+软标签为 `[..., C]` 的非负概率分布，每行总和为 1。
+
+`mean` 对有效位置取平均，`sum` 求和，`none` 保留位置维度。
+被忽略的硬标签不参与损失和梯度；全忽略时返回可反传的零损失。
+
+**代码：[EntropyLoss.py](loss/EntropyLoss.py)**
+
 ### Pretrain Loss
 
-#### 背景与动机
+因果语言模型用当前位置的 logits 预测下一个 token，先做 next-token shift：
+`logits[:, :-1, :]` 对齐 `labels[:, 1:]`。
 
-预训练损失（Pretrain Loss）是因果语言模型最基础的训练目标：给定当前位置之前的 token，预测下一个 token。除 padding 等需要忽略的位置外，序列中的所有 token 都参与损失计算。
+$$\mathcal L_{pretrain}=-\frac1N\sum_{b,t}m_{bt}\log P(x_{b,t+1}\mid x_{b,\le t})$$
 
-这是所有 LLM 训练的基础，理解它是学习 SFT、DPO、PPO 等训练方法的前提。
+$m$ 标记 shift 后的有效标签，$N=\sum m$。`PretrainLoss` 忽略 `-100`，
+按有效 token 数取平均；全忽略时返回零损失。
+输入 logits 为 `[B,T,V]`，labels 为 `[B,T]`。
 
-#### 核心公式
-
-$$\mathcal{L}_{\text{Pretrain}} = -\sum_{t=2}^{T} \log P(x_t \mid x_{<t})$$
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -599,31 +559,24 @@ flowchart TD
     Loss --> Output["loss: scalar"]
 ```
 
----
+</details>
+
+**代码：[PretainLoss.py](loss/PretainLoss.py)**
 
 ### SFT Loss
 
-#### 背景与动机
+监督微调通常只训练 response 部分。它与预训练共享 shift 和交叉熵计算，
+差别在于先把 prompt 对应的 label 设为 `-100`，保留原有 padding 忽略标记：
 
-监督微调（Supervised Fine-Tuning, SFT）损失是带 prompt 掩码的交叉熵损失。在指令微调中，通常只计算 response 部分的损失，不计算 prompt 部分。
+$$\mathcal L_{SFT}=-\frac1{N_{response}}\sum_{b,t}m^{response}_{bt}
+\log P(x_{b,t+1}\mid x_{b,\le t})$$
 
-如果只看损失函数的实现，SFT Loss 与 Pretrain Loss 的 next-token Cross Entropy 完全相同，唯一的实质差异是 **mask**：
+非空 prompt 的长度为 $p\ge1$ 时，使用从零开始的下标，首个 response token 位于 `labels[:, p]`，
+由 `logits[:, p-1, :]` 预测。因此应先屏蔽原始 labels，再做 shift，避免错位。
+最终按有效 response token 数取平均，全忽略时返回零损失。
 
-| | Pretrain Loss | SFT Loss |
-|---|---|---|
-| 参与损失的 token | 所有未被忽略的 token | 仅 response token |
-| prompt label | 正常参与损失 | 设为 `-100`，不参与损失 |
-| Shift + CrossEntropy | 相同 | 相同 |
-
-两者的训练阶段和数据形式不同，但损失计算的主干没有变化。
-
-#### 核心公式
-
-$$\mathcal{L}_{SFT} = -\sum_{t=p}^{T} \log P(y_t | x, y_{<t})$$
-
-其中 $p$ 是 prompt 长度，即只对 response 部分计算损失。
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -636,47 +589,55 @@ flowchart TD
     Loss --> Output["loss: scalar"]
 ```
 
----
+</details>
+
+**代码：[SFTLoss.py](loss/SFTLoss.py)**
+
+### InfoNCE Loss
+
+InfoNCE 用正样本与批内负样本训练特征。输入两组 `[B,D]` 向量，
+第 $i$ 对是正样本，其他配对是负样本。归一化后计算余弦相似度：
+
+$$s_{ij}=\frac{\langle\hat q_i,\hat k_j\rangle}{\tau},\qquad
+\mathcal L=-\frac1B\sum_i\log\frac{e^{s_{ii}}}{\sum_j e^{s_{ij}}}$$
+
+分母包含正样本。`info_nce_loss(queries, keys, temperature=0.1, symmetric=False)`
+等价于对相似度矩阵做交叉熵，目标类别为 `arange(B)`。
+温度必须为有限正数；`symmetric=True` 平均两个方向的损失。`B=1` 时损失为零。
+
+**代码：[InfoNCELoss.py](loss/InfoNCELoss.py)**
 
 ### DPO Loss
 
-#### 背景与动机
+直接偏好优化利用同一 prompt 的 chosen / rejected 回答，
+提高当前策略相对参考策略对 chosen 的偏好：
 
-直接偏好优化（Direct Preference Optimization, DPO）是一种无需奖励模型的 RLHF 替代方案。它直接在偏好数据上优化策略，简化了训练流程。
+$$\Delta=\left(\log\pi_\theta(y_w|x)-\log\pi_{ref}(y_w|x)\right)
+-\left(\log\pi_\theta(y_l|x)-\log\pi_{ref}(y_l|x)\right)$$
 
-**核心思想**：增加 chosen 回答的概率，降低 rejected 回答的概率
+$$\mathcal L_{DPO}=-\mathbb E[\log\sigma(\beta\Delta)]$$
 
-#### 核心公式
+输入是策略与参考模型、chosen 与 rejected 共四组 `[B]` 序列 log 概率，
+需在调用前对回答的有效 token 聚合。$\beta$ 控制相对参考策略的约束强度。
+实现使用 `logsigmoid` 保持数值稳定，并支持标签平滑。
 
-$$\mathcal{L}_{DPO} = -\mathbb{E}\left[\log \sigma\left(\beta \left(\log \frac{\pi_\theta(y_w|x)}{\pi_{ref}(y_w|x)} - \log \frac{\pi_\theta(y_l|x)}{\pi_{ref}(y_l|x)}\right)\right)\right]$$
-
-其中：
-- $y_w$：chosen（优选）回答
-- $y_l$：rejected（拒绝）回答
-- $\pi_\theta$：当前策略
-- $\pi_{ref}$：参考策略（通常是 SFT 模型）
-- $\beta$：KL 散度约束系数
-
----
+**代码：[DPOLoss.py](loss/DPOLoss.py)**
 
 ### PPO Loss
 
-#### 背景与动机
+PPO 用裁剪的重要性采样比率限制策略更新。令
+$r_t=\exp(\log\pi_{new,t}-\log\pi_{old,t})$：
 
-近端策略优化（Proximal Policy Optimization, PPO）通过裁剪重要性采样比率来限制策略更新幅度，防止策略崩溃。是 RLHF 训练的核心算法。
+$$\mathcal L_{PPO}=-\mathbb E\left[\min\left(r_tA_t,
+\mathrm{clip}(r_t,1-\epsilon,1+\epsilon)A_t\right)\right]$$
 
-#### 核心公式
+这是供梯度下降最小化的 loss，与最大化的策略目标符号相反。
+优势为正且 $r_t>1+\epsilon$ 时，上界截断收益；
+优势为负且 $r_t<1-\epsilon$ 时，下界截断收益。
+裁剪并不把所有超出区间的比率都强制替换，仍需取两个分支的最小值。
 
-$$\mathcal{L}_{PPO} = -\mathbb{E}\left[\min\left(r_t(\theta) \hat{A}_t, \text{clip}(r_t, 1-\epsilon, 1+\epsilon)\hat{A}_t\right)\right]$$
-
-上式是供梯度下降最小化的 loss；论文中最大化的策略目标使用相反符号。
-
-其中：
-- $r_t = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_{old}}(a_t|s_t)}$（重要性采样比率）
-- $\hat{A}_t$：优势函数估计
-- $\epsilon$：裁剪参数（通常 0.2）
-
-#### 裁剪机制图解
+<details>
+<summary>裁剪机制示意</summary>
 
 ```mermaid
 flowchart LR
@@ -689,88 +650,117 @@ flowchart LR
     Negative --> NegativeClip["r < 1-ε 时停止惩罚<br/>防止过度惩罚"]
 ```
 
----
+</details>
+
+**代码：[PPOLoss.py](loss/PPOLoss.py)**
 
 ### GRPO Loss
 
-#### 背景与动机
+GRPO 为同一 prompt 生成多个回答，利用组内相对奖励估计优势：
 
-分组相对策略优化（Group Relative Policy Optimization, GRPO）是 DeepSeek-Math 提出的算法，被 DeepSeek-R1 用于强化学习训练。它通过组内相对优势来消除对价值网络（Critic）的依赖。
+$$A_i=\frac{R_i-\mathrm{mean}(R)}{\mathrm{std}(R)+\epsilon}$$
 
-**核心思想**：
-- 对同一问题生成多个回答（组）
-- 在组内计算相对优势（而非绝对优势）
-- 无需训练 Critic 网络，简化训练流程
+`compute_grpo_advantages(rewards)` 接收 `[B,G]` 奖励，
+标准差使用总体统计量；单样本组和奖励恒定组的优势为零。
+这种组内估计不需要额外的价值网络。
 
-#### 核心公式
+$$\mathcal L_{GRPO}=-\mathrm{mean}\left[\min\left(rA,
+\mathrm{clip}(r,1-\epsilon_c,1+\epsilon_c)A\right)\right]
++\beta\,\mathrm{mean}(KL)$$
 
-**1. 组内相对优势（Group-Relative Advantage）**
+`grpo_loss(old_log_probs, new_log_probs, advantages, ..., ref_kl=None)`
+对同形状输入逐元素计算比率，再取平均；仅在提供 `ref_kl` 时加入 KL 惩罚。
+此函数没有 response mask 接口，变长回答的 token / 序列权重应由调用者明确处理。
 
-对同一问题生成 $G$ 个回答，计算每个回答的奖励 $r_1, r_2, ..., r_G$，然后计算组内标准化优势：
+**代码：[GRPOLoss.py](loss/GRPOLoss.py)**
 
-$$\hat{A}_i = \frac{r_i - \text{mean}(\mathbf{r})}{\text{std}(\mathbf{r})}$$
+### DAPO Loss
 
-**2. GRPO 损失函数**
+DAPO 损失使用 token 级重要性比率、非对称裁剪和有效 token 归一化。
+定义 $r_{it}=\exp(\log\pi_{new,it}-\log\pi_{old,it})$，$m$ 标记有效 response token：
 
-$$\mathcal{L}_{GRPO} = -\mathbb{E}\left[\frac{1}{G}\sum_{i=1}^{G} \min\left(\rho_i \hat{A}_i, \text{clip}(\rho_i, 1-\epsilon, 1+\epsilon)\hat{A}_i\right) - \beta \cdot \mathbb{D}_{KL}\right]$$
+$$\mathcal L_{DAPO}=-\frac{\sum_{i,t}m_{it}\min\left(r_{it}A_{it},
+\mathrm{clip}(r_{it},1-\epsilon_{low},1+\epsilon_{high})A_{it}\right)}{\sum_{i,t}m_{it}}$$
 
-其中：
-- $\rho_i = \frac{\pi_\theta(o_i|q)}{\pi_{\theta_{old}}(o_i|q)}$（重要性采样比率）
-- $\hat{A}_i$：组内相对优势
-- $\beta$：KL 散度惩罚系数
-- $\mathbb{D}_{KL}$：策略与参考策略的 KL 散度
+`dapo_loss` 的 old / new log 概率为 `[B,T]`，优势支持 `[B]`、`[B,1]` 或 `[B,T]`。
+默认 `epsilon_low=0.2`、`epsilon_high=0.28`。所有有效 token 等权，
+长回答因有效 token 更多而贡献更多项；全 mask 时返回零损失。
+旧策略概率和优势在内部 detach，梯度流向新策略。
 
-#### 与 PPO 的区别
+本文件覆盖损失核心，动态采样、超长回答处理和 rollout 系统需由训练流程实现。
 
-| 特性 | PPO | GRPO |
-|------|-----|------|
-| 优势估计 | 需要 Critic 网络 | 组内相对优势 |
-| 额外网络 | 需要 Value Head | 不需要 |
-| 内存占用 | 较高 | 较低 |
-| 适用场景 | 通用 RL | 多候选生成场景 |
+**代码：[DAPOLoss.py](loss/DAPOLoss.py)**
 
----
+### GSPO Loss
 
-### 新增损失函数
+GSPO 先计算每条回答的平均 log ratio，再取指数得到序列级比率：
 
-| 损失 | 关键计算 | 需要说明的区别 |
+$$s_i=\exp\left(\frac{\sum_t m_{it}(\log\pi_{new,it}-\log\pi_{old,it})}
+{\sum_t m_{it}}\right)$$
+
+$$\mathcal L_{GSPO}=-\frac1{B_{valid}}\sum_{i:\,length_i>0}
+\min\left(s_iA_i,\mathrm{clip}(s_i,1-\epsilon_{low},1+\epsilon_{high})A_i\right)$$
+
+`gspo_loss` 的 old / new log 概率为 `[B,T]`，优势为 `[B]`。
+默认裁剪参数为 `epsilon_low=3e-4`、`epsilon_high=4e-4`；
+仅对非空回答等权平均，全 mask 时返回零损失。
+旧策略概率和优势在内部 detach。
+
+| 对比 | DAPO | GSPO |
 |---|---|---|
-| InfoNCE | 归一化特征的相似度矩阵、温度缩放、对角正样本 | 分母包含正样本；可选双向计算 |
-| DAPO | token 级重要性比率、非对称 clipping | 全体有效 token 等权，长回答贡献更多 token |
-| GSPO | 每条回答的平均 log ratio，再取 exp | 每条有效回答等权，序列级 clipping |
-| KL k1 / k2 / k3 | log ratio、平方近似、控制变量估计 | 采样分布与 KL 方向必须明确，k2 一般有偏 |
-| 软标签 CE | `-sum(target * log_softmax(logits))` | 与硬标签索引式 CE 的输入形状不同 |
+| 重要性比率 | 每个 token 的比率 | 平均 log ratio 的指数 |
+| 裁剪粒度 | token | 整条回答 |
+| 归约权重 | 有效 token 等权 | 非空回答等权 |
 
-具体 API、公式和验证方式见 [手撕题学习清单](docs/INTERVIEW_GUIDE.md)。
+$s_i$ 是 token 比率的几何平均，不是比率的算术平均，也不是未按长度归一化的连乘。
 
----
+**代码：[GSPOLoss.py](loss/GSPOLoss.py)**
+
+### KL Divergence
+
+当已知完整类别分布时，可以精确计算：
+
+$$D_{KL}(P\Vert Q)=\sum_jP_j(\log P_j-\log Q_j)$$
+
+`EntropyLoss.KL_divergence` 对最后一维求和，再对分布取平均，
+不是对全部类别元素取平均。
+
+采样估计要求 $x\sim P$，输入 `log_probs = log P(x)`、`ref_log_probs = log Q(x)`。
+记 $l=\log Q(x)-\log P(x)$：
+
+$$k_1=-l,\qquad k_2=\tfrac12l^2,\qquad k_3=e^l-1-l$$
+
+`sampled_kl_divergence(..., estimator="k3", mask=None, reduction="mean")`
+支持三个估计器与有效位置 mask。k1 的单样本值可为负，期望为 KL；
+k2 是局部平方近似，一般有偏；k3 使用控制变量，近零时用 `expm1(l)-l` 减少相消误差。
+k1 / k3 的无偏性依赖实际从 P 采样和相应支撑条件。
+对采样值直接自动求导，也不自动等于精确 KL 对策略参数的梯度。
+
+**代码：[EntropyLoss.py](loss/EntropyLoss.py) · [KLDivergence.py](loss/KLDivergence.py)**
+
 
 ## 参数高效微调
 
 ### LoRA
 
-#### 背景与动机
+LoRA 冻结基础权重，在旁路中训练低秩更新：
 
-低秩适应（Low-Rank Adaptation, LoRA）通过在预训练权重旁添加低秩分解矩阵来实现参数高效微调。它冻结预训练权重，只训练少量参数，大大降低了微调成本。
+$$y=W_0x+\frac\alpha rBAx$$
 
-**核心思想**：权重更新 $\Delta W$ 可以被低秩分解为 $B \cdot A$
+$W_0$ 形状为 `[out_features, in_features]`，
+$A$ 为 `[r, in_features]`，$B$ 为 `[out_features, r]`，且 $r$ 远小于输入和输出维度。
+A 随机初始化，B 初始化为零，使初始输出与基础线性层相同。
+冻结基础权重时仍需保留输入梯度，才能把误差信号传回前层。
 
-#### 核心公式
+推理时可以合并权重：
 
-$$h = W_0 x + \Delta W x = W_0 x + BAx$$
+$$W_{merged}=W_0+\frac\alpha rBA$$
 
-其中：
-- $W_0 \in \mathbb{R}^{d \times k}$：冻结的预训练权重
-- $A \in \mathbb{R}^{r \times k}$：可训练，使用随机初始化
-- $B \in \mathbb{R}^{d \times r}$：可训练，初始化为零
-- $r \ll \min(d, k)$：低秩维度
+`merged_linear()` 返回独立的合并线性层。
+旁路包含 dropout 时，应先切换到 `eval()` 再比较合并前后的输出。
 
-**关键设计**：$B$ 初始化为零，使得初始状态 $BA = 0$，保证微调开始时模型行为不变。
-
-`LoRALinear.merged_linear()` 返回一个独立的合并线性层，可在 `eval()` 后用于推理。
-原模块的权重与训练状态保留，梯度仍能通过冻结的基础分支传向输入。
-
-#### 张量形状流程图
+<details>
+<summary>张量形状示意</summary>
 
 ```mermaid
 flowchart TD
@@ -788,28 +778,129 @@ flowchart TD
     Add --> Output["输出: [batch, seq_len, out_features]"]
 ```
 
----
+</details>
+
+**代码：[LoRALinear.py](peft/LoRALinear.py)**
+
+
+## 分词
+
+### Byte-level BPE
+
+Byte-level BPE 从 256 个 UTF-8 byte token 开始，统计相邻 token 对的频率，
+反复合并高频对并记录学习顺序。编码时按 merge rank 应用规则，
+不是重新按待编码文本中的频率选择合并。
+
+```python
+from tokenizer.BPE import ByteBPETokenizer
+
+tokenizer = ByteBPETokenizer().fit(["你好，世界！", "你好，面试！"], num_merges=16)
+text = "你好 新词🙂\n"
+assert tokenizer.decode(tokenizer.encode(text)) == text
+```
+
+基础 byte 词表可表示未见过的中文、英文、空格、换行和 emoji。
+单个 byte token 可能不是完整字符，解码时应拼接全部字节后统一进行 UTF-8 解码。
+频率并列时使用确定性的规则，训练样本之间不跨边界合并。
+该实现包含合并训练、编码与解码；GPT-2 风格的正则预分词和特殊 token 协议需另行实现。
+
+**代码：[BPE.py](tokenizer/BPE.py)**
+
+
+## 量化
+
+### INT8 量化
+
+量化使用 scale $s$ 与 zero point $z$ 将浮点值映射到整数，再近似恢复：
+
+$$q=\mathrm{clamp}(\mathrm{round}(x/s)+z),\qquad \hat x=(q-z)s$$
+
+| 模式 | 整数范围 | scale | zero point |
+|---|---|---|---|
+| 对称 | $[-127,127]$ | $\max|x|/127$ | $0$ |
+| 非对称 | $[-128,127]$ | $(x_{max}-x_{min})/255$ | 裁剪后的 $\mathrm{round}(-128-x_{min}/s)$ |
+
+非对称模式先把校准范围扩展到包含零。
+返回 `Int8Quantized(values, scale, zero_point)`，`values` 真正使用 `torch.int8` 存储。
+全零输入使用合法的非零 scale，正 / 负常量也能处理。
+
+量化误差来自舍入和范围裁剪。本文件实现逐张量量化与反量化，
+逐通道量化、QAT 和 INT8 矩阵乘 kernel 属于进一步扩展。
+
+**代码：[Quantization.py](components/Quantization.py)**
+
+
+## 生成
+
+### 生成采样
+
+给定词表 logits，采样依次进行温度缩放、候选过滤和随机抽取：
+
+$$p_i=\mathrm{softmax}(z_i/\tau)$$
+
+1. `temperature` 必须是有限正数；较低温度让分布更集中，较高温度让分布更平缓。
+2. `top_k` 保留指定数量的候选，`None` 表示不限制。
+3. `top_p` 按概率降序累计，保留首次达到阈值的最小前缀。
+4. 对过滤后的 logits 做 softmax，再用 multinomial 抽样。
+
+跨过 top-p 阈值的 token 必须保留，至少留下一个候选。
+`filter_logits` 返回过滤结果且不修改输入；
+`sample_logits` 返回 `logits.shape[:-1]` 的 token IDs。
+`greedy=True` 使用 argmax；传入 `torch.Generator` 可复现随机结果。
+允许用 `-inf` 禁止某个 token，NaN、`+inf` 或整行无候选会报错。
+
+**代码：[Sampling.py](generation/Sampling.py)**
+
+
+## 工具调用
+
+### 流式参数解析
+
+工具调用参数会以 JSON 片段分批到达，多条调用也可能交错。
+解析器按调用索引分别维护状态，处理三类事件：
+
+1. `response.output_item.added` 注册调用信息。
+2. `response.function_call_arguments.delta` 追加参数片段。
+3. `response.function_call_arguments.done` 完成参数并验证 JSON object。
+
+`output_index` 区分交错调用，`item_id` 校验归属。
+`ToolCallParser.feed(event)` 返回刚完成的调用或 `None`，
+`finish()` 检查流是否完整；`parse_tool_calls(events)` 返回按索引排序的 `ToolCall` 列表，
+包含调用 ID、名称与解析后的参数字典。
+
+错误 JSON、未知索引、重复完成和未结束的调用都会报错。
+解析器生成结构化调用信息，工具执行由调用者负责。
+
+**代码：[ToolCallParser.py](tools/ToolCallParser.py)**
 
 ## 参考文献
 
-### 注意力机制
+<details>
+<summary>展开参考论文</summary>
+
+**注意力机制**
+
 - [Attention Is All You Need](https://arxiv.org/abs/1706.03762) - Transformer / MHA
 - [GQA: Training Generalized Multi-Query Transformer Models](https://arxiv.org/abs/2305.13245) - GQA
 - [DeepSeek-V2](https://arxiv.org/abs/2405.04434) - MLA
 
-### 位置编码
+**位置编码**
+
 - [RoFormer: Rotary Position Embedding](https://arxiv.org/abs/2104.09864) - RoPE
 
-### 归一化
+**归一化**
+
 - [Layer Normalization](https://arxiv.org/abs/1607.06450)
 - [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)
 
-### 前馈网络
+**前馈网络**
+
 - [GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202) - SwiGLU
 - [Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer](https://arxiv.org/abs/1701.06538) - MoE
 - [Mixtral of Experts](https://arxiv.org/abs/2401.04088) - MoE
 
-### 训练方法
+**训练方法**
+
 - [Direct Preference Optimization](https://arxiv.org/abs/2305.18290) - DPO
 - [Proximal Policy Optimization](https://arxiv.org/abs/1707.06347) - PPO
 - [DeepSeekMath](https://arxiv.org/abs/2402.03300) - GRPO
@@ -819,8 +910,8 @@ flowchart TD
 - [Representation Learning with Contrastive Predictive Coding](https://arxiv.org/abs/1807.03748) - InfoNCE
 - [Approximating KL Divergence](http://joschu.net/blog/kl-approx.html) - k1 / k2 / k3
 
-### 参数高效微调
+**参数高效微调**
+
 - [LoRA: Low-Rank Adaptation](https://arxiv.org/abs/2106.09685)
 
----
-
+</details>
