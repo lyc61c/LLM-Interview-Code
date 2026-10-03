@@ -1,70 +1,26 @@
-"""
-直接偏好优化损失（Direct Preference Optimization Loss）
+"""DPO：直接使用 chosen/rejected 偏好优化策略相对参考策略的概率。"""
 
-DPO 是一种不使用奖励模型的 RLHF 替代方案。
-通过直接优化人类偏好数据来对齐语言模型，避免了训练奖励模型的复杂性。
-
-参考论文: Direct Preference Optimization: Your Language Model is Secretly a Reward Model
-"""
-
-import math
-import torch
-import torch.nn.functional as F
+from torch.nn import functional as F
 
 
 def dpo_loss(policy_chosen_logps, policy_rejected_logps,
              ref_chosen_logps, ref_rejected_logps,
              beta=0.1, label_smoothing=0.0):
+    """四组输入为同形状非空 [B] 序列 log 概率，调用前已聚合有效 token。
+
+    beta>0，label_smoothing 位于 [0,1]。
+    L=-mean(log sigmoid(beta*(chosen_ratio-rejected_ratio)))。
     """
-    计算 DPO 损失
-
-    DPO 的核心思想是：将奖励函数参数化为策略和参考策略的对数比率，
-    然后直接在偏好数据上优化这个隐式奖励。
-
-    公式: L_DPO = -E[log sigmoid(β * (log(π_θ(y_w|x) / π_ref(y_w|x)) - log(π_θ(y_l|x) / π_ref(y_l|x))))]
-
-    Args:
-        policy_chosen_logps: 策略模型对 chosen 回复的对数概率 [batch_size]
-        policy_rejected_logps: 策略模型对 rejected 回复的对数概率 [batch_size]
-        ref_chosen_logps: 参考模型对 chosen 回复的对数概率 [batch_size]
-        ref_rejected_logps: 参考模型对 rejected 回复的对数概率 [batch_size]
-        beta: KL 散度的缩放因子，控制对参考模型的偏离程度，默认 0.1
-        label_smoothing: 标签平滑系数，默认 0.0
-
-    Returns:
-        loss: DPO 损失值（标量）
-    """
-    values = (policy_chosen_logps, policy_rejected_logps, ref_chosen_logps, ref_rejected_logps)
-    if policy_chosen_logps.ndim != 1 or policy_chosen_logps.numel() == 0:
-        raise ValueError("logps 必须为非空 [batch_size]，是已聚合的序列 log 概率")
-    for value in values:
-        if value.shape != policy_chosen_logps.shape or value.device != policy_chosen_logps.device:
-            raise ValueError("四个 logps 必须形状相同且位于同一设备")
-        if not value.is_floating_point() or not torch.isfinite(value).all():
-            raise ValueError("logps 必须是有限的浮点张量")
-    if not math.isfinite(beta) or beta <= 0:
-        raise ValueError("beta 必须为正且有限")
-    if not math.isfinite(label_smoothing) or not 0 <= label_smoothing <= 1:
-        raise ValueError("label_smoothing 必须在 [0,1]")
-    # 步骤1: 计算对数比率（隐式奖励）
-    # chosen_ratio = log(π_θ(y_w|x) / π_ref(y_w|x))
+    # 步骤1: 计算 chosen/rejected 相对参考策略的 log 比率。
     chosen_ratio = policy_chosen_logps - ref_chosen_logps
-
-    # rejected_ratio = log(π_θ(y_l|x) / π_ref(y_l|x))
     rejected_ratio = policy_rejected_logps - ref_rejected_logps
+    preference_logits = beta * (chosen_ratio - rejected_ratio)
 
-    # 步骤2: 计算 DPO logits（chosen 和 rejected 的奖励差）
-    # logits: [batch_size]
-    logits = chosen_ratio - rejected_ratio
+    # 步骤2: 用 logsigmoid 计算损失，避免先 sigmoid 再 log 的下溢。
+    losses = -F.logsigmoid(preference_logits)
 
-    # 步骤3: 计算 DPO 损失
-    # dpo_loss = -log(sigmoid(β * logits))
-    dpo_loss = -F.logsigmoid(beta * logits).mean()
-
-    # 步骤4: 应用标签平滑（可选）
-    if label_smoothing > 0.0:
-        # 标签平滑版本：混合正向和反向损失
-        inverse_loss = -F.logsigmoid(-beta * logits).mean()
-        dpo_loss = (1 - label_smoothing) * dpo_loss + label_smoothing * inverse_loss
-
-    return dpo_loss
+    # 步骤3: 标签平滑混合正向和反向偏好损失。
+    if label_smoothing > 0:
+        inverse_losses = -F.logsigmoid(-preference_logits)
+        losses = (1 - label_smoothing) * losses + label_smoothing * inverse_losses
+    return losses.mean()

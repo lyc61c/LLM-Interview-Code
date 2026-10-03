@@ -30,14 +30,11 @@ class LoRALinear(nn.Module):
         rank: LoRA 的秩（低秩矩阵的维度），默认 8
         alpha: LoRA 的缩放因子，默认 1.0
         dropout: Dropout 概率，默认 0.0
+                 前提：维度与 rank 为正，0 <= dropout < 1。
     """
 
     def __init__(self, in_features, out_features, rank=8, alpha=1.0, dropout=0.0):
         super().__init__()
-        if min(in_features, out_features, rank) <= 0:
-            raise ValueError("in_features、out_features 与 rank 必须为正")
-        if not math.isfinite(alpha) or not 0 <= dropout < 1:
-            raise ValueError("alpha 必须有限，且 0 <= dropout < 1")
 
         # 原始预训练权重（冻结）
         self.weight = nn.Linear(in_features, out_features, bias=False)
@@ -103,10 +100,8 @@ class LoRALinear(nn.Module):
         """返回合并后的独立 nn.Linear，保留原模块及其训练状态。
 
         W_merged = W_0 + (alpha / rank) * B @ A。
-        合并用于推理；训练中的非零 dropout 无法被固定权重表示。
+        合并前调用 eval()；训练中的非零 dropout 无法被固定权重表示。
         """
-        if self.training and self.dropout.p:
-            raise ValueError("合并前请调用 eval()，关闭 LoRA 分支的 dropout")
         merged = nn.Linear(
             self.weight.in_features, self.weight.out_features, bias=False,
             device=self.weight.weight.device, dtype=self.weight.weight.dtype,

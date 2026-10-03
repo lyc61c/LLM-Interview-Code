@@ -2,14 +2,13 @@
 旋转位置编码（Rotary Position Embedding, RoPE）
 
 一种将位置信息编码到注意力机制中的方法，通过旋转向量来表示相对位置。
-具有良好的外推性和位置感知能力。
+使注意力点积包含相对位置信息。
 
 参考论文: RoFormer: Enhanced Transformer with Rotary Position Embedding
 """
 
 import torch
 import torch.nn as nn
-import math
 
 
 class RotaryEmbedding(nn.Module):
@@ -20,19 +19,14 @@ class RotaryEmbedding(nn.Module):
     公式: f(x, m) = x * cos(m*θ) + rotate_half(x) * sin(m*θ)
 
     Args:
-        head_dim: 旋转编码的维度（通常是 attention head 的维度）
-        max_seq_len: 支持的最大序列长度
-        theta: 旋转角度的基数，默认 10000.0
+        head_dim: 正偶数，旋转编码的维度（通常是 attention head 的维度）
+        max_seq_len: 频率表的初始容量，默认 2048，超出后自动扩展
+        theta: 正的旋转频率基数，默认 10000.0
     """
 
     def __init__(self, head_dim, max_seq_len=2048, theta=10000.0):
         super().__init__()
-        if not isinstance(head_dim, int) or head_dim <= 0 or head_dim % 2 != 0:
-            raise ValueError("head_dim must be a positive even integer")
-        if not isinstance(max_seq_len, int) or max_seq_len <= 0:
-            raise ValueError("max_seq_len must be a positive integer")
-        if not isinstance(theta, (int, float)) or theta <= 0 or not math.isfinite(theta):
-            raise ValueError("theta must be positive and finite")
+        assert head_dim % 2 == 0, "RoPE head_dim must be even"
 
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
@@ -83,24 +77,15 @@ class RotaryEmbedding(nn.Module):
         Args:
             xq: 查询张量 [batch_size, seq_len, num_heads, head_dim]
             xk: 键张量 [batch_size, seq_len, num_kv_heads, head_dim]
-            offset: 当前 chunk 的绝对起始位置，KV Cache 解码时等于历史长度。
+            offset: 非负整数，当前 chunk 的绝对起始位置，解码时等于历史长度。
                     历史 K 已旋转，只对新 Q/K 用 offset 旋转，不能再次旋转历史 K。
 
         Returns:
             xq_rotated: 旋转后的查询 [batch_size, seq_len, num_heads, head_dim]
             xk_rotated: 旋转后的键 [batch_size, seq_len, num_kv_heads, head_dim]
         """
-        if any(not isinstance(t, torch.Tensor) or t.ndim != 4 for t in (xq, xk)):
-            raise ValueError("xq and xk must have shape [batch, seq_len, heads, head_dim]")
-        if xq.shape[:2] != xk.shape[:2] or xq.shape[-1] != self.head_dim or xk.shape[-1] != self.head_dim:
-            raise ValueError("xq/xk batch, sequence length and configured head_dim must match")
-        if not xq.is_floating_point() or xq.dtype != xk.dtype or xq.device != xk.device:
-            raise ValueError("xq and xk must have the same floating dtype and device")
-        if not isinstance(offset, int) or offset < 0:
-            raise ValueError("offset must be a non-negative integer")
+        # 步骤1：确定本轮 token 的绝对位置区间 [offset, offset + seq_len)。
         seq_len = xq.size(1)
-        if seq_len <= 0:
-            raise ValueError("seq_len must be positive")
         end = offset + seq_len
         # 角度至少以 fp32 计算；double 输入保留 double 精度。超出初始容量时扩容，
         # 并在 module.half() 后重新生成 fp32 表，避免低精度位置频率误差。
@@ -112,7 +97,7 @@ class RotaryEmbedding(nn.Module):
             self.max_seq_len = capacity
             self._table_dtype = table_dtype
 
-        # 获取当前位置的 cos 和 sin 值
+        # 步骤2：取当前位置的 cos / sin，再补上 batch 和 head 的广播维度。
         # cos, sin: [1, seq_len, 1, head_dim]
         cos = self.cos[offset:end].to(dtype=xq.dtype).view(1, seq_len, 1, self.head_dim)
         sin = self.sin[offset:end].to(dtype=xq.dtype).view(1, seq_len, 1, self.head_dim)
@@ -132,7 +117,7 @@ class RotaryEmbedding(nn.Module):
             # 拼接为 [-x2, x1]: [..., head_dim]
             return torch.cat((-x2, x1), dim=-1)
 
-        # 应用旋转位置编码
+        # 步骤3：把前后半区组成特征对，应用二维旋转。
         # 公式: x * cos + rotate_half(x) * sin
         #
         # 详细推导:

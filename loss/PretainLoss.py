@@ -1,40 +1,29 @@
-"""
-预训练损失（Pretrain Loss）
-
-用于大语言模型预训练的标准因果语言模型损失。
-采用下一个词预测（Next Token Prediction）任务。
-"""
+"""因果语言模型预训练损失：当前位置预测下一个 token。"""
 
 import torch
-import torch.nn as nn
-from ._utils import causal_lm_loss
+from torch import nn
+from torch.nn import functional as F
 
 
 class PretrainLoss(nn.Module):
-    """
-    预训练损失模块
-
-    计算因果语言模型的交叉熵损失。
-    通过预测下一个词来训练语言模型。
-
-    Args:
-        ignore_index: 忽略的标签索引，不计入损失计算，默认 -100
-    """
+    """输入浮点 logits [B,T,V]、整数 labels [B,T]，忽略标签默认为 -100。"""
 
     def __init__(self, ignore_index=-100):
         super().__init__()
         self.ignore_index = ignore_index
 
     def forward(self, logits, labels):
-        """
-        前向传播
+        # 步骤1: next-token shift，最后一个 logit 与第一个 label 不参与损失。
+        shifted_logits = logits[:, :-1, :]
+        shifted_labels = labels[:, 1:]
+        valid = shifted_labels != self.ignore_index
 
-        Args:
-            logits: 模型输出的未归一化对数概率 [batch_size, seq_len, vocab_size]
-            labels: 真实词元索引 [batch_size, seq_len]
+        # 步骤2: 清理忽略行并展平，CE 的类别维度为 vocab_size。
+        shifted_logits = torch.where(valid.unsqueeze(-1), shifted_logits, 0.0)
+        flat_logits = shifted_logits.reshape(-1, logits.shape[-1])
+        flat_labels = shifted_labels.reshape(-1)
 
-        Returns:
-            loss: 标量损失值
-        """
-        # sum / 有效标签数：全忽略或 seq_len<=1 时返回可反传的 0。
-        return causal_lm_loss(logits, labels, self.ignore_index)
+        # 步骤3: 先求损失之和，再除以有效 token 数；全忽略时为可导的 0。
+        loss_sum = F.cross_entropy(flat_logits, flat_labels,
+                                   ignore_index=self.ignore_index, reduction="sum")
+        return loss_sum / valid.sum().clamp_min(1)

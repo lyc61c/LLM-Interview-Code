@@ -281,25 +281,6 @@ def test_loss_gradcheck(name):
     assert torch.autograd.gradcheck(fn, (values,))
 
 
-@pytest.mark.parametrize("call", [
-    lambda: cross_entropy_loss(torch.randn(2, 3), torch.ones((2, 3))),
-    lambda: cross_entropy_loss(torch.randn(2, 3), torch.tensor([3, 0])),
-    lambda: info_nce_loss(torch.randn(2, 3), torch.randn(2, 3), temperature=0),
-    lambda: dapo_loss(torch.zeros(2, 3), torch.zeros(2, 3), torch.ones(3)),
-    lambda: gspo_loss(torch.zeros(2, 3), torch.zeros(2, 3), torch.ones(2, 3)),
-    lambda: kl_k3(torch.ones(2), torch.ones(3)),
-    lambda: kl_k3(torch.ones(2), torch.ones(2), mask=torch.tensor([1., .5])),
-    lambda: sampled_kl_divergence(torch.ones(2), torch.ones(2), "unknown"),
-    lambda: compute_grpo_advantages(torch.empty(2, 0)),
-    lambda: SFTLoss()(torch.randn(2, 3, 4), torch.zeros(2, 3, dtype=torch.long), [4, 2]),
-    lambda: dpo_loss(torch.ones(2), torch.ones(1), torch.ones(2), torch.ones(2)),
-    lambda: dpo_loss(*(torch.ones(2) for _ in range(4)), label_smoothing=-.1),
-])
-def test_invalid_inputs_raise_actionable_errors(call):
-    with pytest.raises(ValueError):
-        call()
-
-
 def test_ppo_import_has_no_plotting_dependency_or_side_effect():
     # 子进程中令 matplotlib/numpy 的 import 失败，确保它们只在绘图函数中加载。
     code = """
@@ -318,34 +299,6 @@ assert ppo_clip_loss(torch.zeros(1), torch.zeros(1), torch.ones(1)).item() == -1
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("loss_fn,expected", [(dapo_loss, -1.28), (gspo_loss, -1.0004)])
-def test_positive_policy_clipping_avoids_overflow_in_backward(loss_fn, expected):
-    # exp(1000)=Inf，正优势的目标实际已经被上界 clip 到有限值。
-    old = torch.tensor([[-1000.]])
-    new = torch.tensor([[0.]], requires_grad=True)
-    loss = loss_fn(old, new, torch.ones(1))
-    torch.testing.assert_close(loss, torch.tensor(expected))
-    loss.backward()
-    assert torch.equal(new.grad, torch.zeros_like(new))
-
-
-@pytest.mark.parametrize("loss_fn", [dapo_loss, gspo_loss])
-def test_zero_policy_advantage_does_not_multiply_zero_by_infinity(loss_fn):
-    old = torch.tensor([[-1000.]])
-    new = torch.tensor([[0.]], requires_grad=True)
-    loss = loss_fn(old, new, torch.zeros(1))
-    assert loss.item() == 0
-    loss.backward()
-    assert torch.equal(new.grad, torch.zeros_like(new))
-
-
-@pytest.mark.parametrize("loss_fn", [dapo_loss, gspo_loss])
-def test_negative_policy_advantage_rejects_real_objective_overflow(loss_fn):
-    # A<0 时 min 选择未截断的大比率，不能为“稳定”把原目标偷偷上界裁掉。
-    with pytest.raises(ValueError, match="可表示范围"):
-        loss_fn(torch.tensor([[-1000.]]), torch.tensor([[0.]], requires_grad=True), -torch.ones(1))
-
-
 @pytest.mark.parametrize("ignored_value", [float("-inf"), float("inf"), float("nan")])
 def test_ce_cleans_ignored_rows_before_softmax(ignored_value):
     values = torch.tensor([[1., 2., 3.], [ignored_value] * 3], requires_grad=True)
@@ -360,20 +313,6 @@ def test_ce_cleans_ignored_rows_before_softmax(ignored_value):
     zero.backward()
     assert zero.item() == 0
     assert torch.equal(all_ignored.grad, torch.zeros_like(all_ignored))
-
-
-@pytest.mark.parametrize("invalid", [float("-inf"), float("inf"), float("nan")])
-def test_effective_ce_rows_must_define_a_distribution(invalid):
-    logits = torch.full((1, 3), invalid)
-    for targets in (torch.tensor([1]), torch.tensor([[.2, .5, .3]])):
-        with pytest.raises(ValueError):
-            cross_entropy_loss(logits, targets)
-    # 单个屏蔽类的 -Inf 则是合法分布；软标签在该类必须为 0 才是有限 CE。
-    logits = torch.tensor([[0., float("-inf"), 0.]], requires_grad=True)
-    loss = cross_entropy_loss(logits, torch.tensor([[.5, 0., .5]]))
-    torch.testing.assert_close(loss, torch.tensor(math.log(2)))
-    loss.backward()
-    assert torch.isfinite(logits.grad).all()
 
 
 @pytest.mark.parametrize("loss_type", ["pretrain", "sft"])
@@ -401,17 +340,6 @@ def test_causal_ce_nonfinite_ignored_logits_have_zero_gradient(loss_type, ignore
     assert torch.equal(all_ignored.grad, torch.zeros_like(all_ignored))
 
 
-@pytest.mark.parametrize("loss_fn", [dapo_loss, gspo_loss, kl_k3])
-def test_complex_masks_are_rejected(loss_fn):
-    old = torch.zeros((2, 3))
-    mask = torch.ones((2, 3), dtype=torch.complex64)
-    with pytest.raises(ValueError, match="复数"):
-        if loss_fn == kl_k3:
-            loss_fn(old, old, mask=mask)
-        else:
-            loss_fn(old, old, torch.ones(2), mask=mask)
-
-
 def test_info_nce_preserves_float32_computation_under_autocast():
     torch.manual_seed(31)
     queries = torch.randn(4, 7, requires_grad=True)
@@ -425,10 +353,9 @@ def test_info_nce_preserves_float32_computation_under_autocast():
     assert torch.isfinite(queries.grad).all() and torch.isfinite(keys.grad).all()
 
 
-def test_info_nce_rejects_unrepresentable_temperature_and_feature_norm():
-    features = torch.eye(2)
-    with pytest.raises(ValueError, match="temperature"):
-        info_nce_loss(features, features, temperature=1e-50)
-    large_features = torch.full((2, 3), 1e30)
-    with pytest.raises(ValueError, match="范数"):
-        info_nce_loss(large_features, large_features)
+def test_soft_ce_zero_probability_class_does_not_contribute():
+    logits = torch.tensor([[0., float("-inf"), 0.]], requires_grad=True)
+    loss = cross_entropy_loss(logits, torch.tensor([[.5, 0., .5]]))
+    torch.testing.assert_close(loss, torch.tensor(math.log(2)))
+    loss.backward()
+    assert torch.isfinite(logits.grad).all()

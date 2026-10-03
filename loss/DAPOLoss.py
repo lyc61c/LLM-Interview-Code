@@ -1,41 +1,34 @@
-"""DAPO 的策略损失核心：Clip-Higher + Token-level Policy Gradient Loss。
+"""DAPO 策略损失核心：非对称 clipping + 全有效 token 归一化。
 
-参考原论文 Eq.12：https://arxiv.org/html/2503.14476v1
-这里不实现动态采样、奖励计算、overlong shaping 或分布式训练系统。
+仅展示损失计算；动态采样、奖励计算和超长回答处理属于训练流程。
 """
 
 import torch
 
-from ._utils import clipped_policy_surrogate, make_mask, safe_log_ratio, validate_clips, validate_pair
-
 
 def dapo_loss(old_log_probs, new_log_probs, advantages, mask=None,
               epsilon_low=0.2, epsilon_high=0.28):
-    """old/new_log_probs: [B, T]；advantage: [B]、[B,1] 或 [B,T]。
+    """old/new_log_probs: [B,T]；advantages: [B]、[B,1] 或 [B,T]。
 
-    r_it=exp(log pi_new - log pi_old)，
-    L=-sum_it mask_it * min(r_it*A_it, clip(r_it,1-eps_low,1+eps_high)*A_it)
-      / sum_it mask_it。
-
-    所有有效 token 等权，长回答占更大权重；mask=1 表示 response token。
-    old policy 和 advantage 视为固定 rollout 数据，内部 detach。
-    全部屏蔽返回可反传的 0；有效位置的 log_probs 必须有限。
-    在 log 域执行等价裁剪，未被裁剪的目标真正溢出时抛 ValueError。
+    mask 为同形状的 0/1 或 bool 张量，1 表示有效 response token。
+    L=-sum(mask*min(r*A,clip(r)*A))/sum(mask)，r=exp(log pi_new-log pi_old)。
+    rollout 的 old policy 与 advantage 不参与反传，全屏蔽返回可导的 0。
+    假设有效输入和 exp 比率在输入精度内可表示，0<=epsilon_low<1、epsilon_high>=0。
     """
-    validate_pair(old_log_probs, new_log_probs)
-    validate_clips(epsilon_low, epsilon_high)
-    if new_log_probs.ndim != 2:
-        raise ValueError("log_probs 必须为 [B, T]")
-    if advantages.device != new_log_probs.device or not advantages.is_floating_point():
-        raise ValueError("advantages 必须是同设备的浮点张量")
-    if advantages.shape == (new_log_probs.shape[0],):
+    # 步骤1: 准备 mask 与 token 优势；每条回答的优势沿 token 维广播。
+    valid = torch.ones_like(new_log_probs, dtype=torch.bool) if mask is None else mask.bool()
+    if advantages.ndim == 1:
         advantages = advantages.unsqueeze(-1)
-    if advantages.shape not in ((new_log_probs.shape[0], 1), new_log_probs.shape):
-        raise ValueError("advantages 必须为 [B]、[B,1] 或 [B,T]")
-    valid = make_mask(new_log_probs, mask)
-    log_ratio = safe_log_ratio(old_log_probs, new_log_probs, valid)
-    advantage = torch.where(valid, advantages.detach(), 0.0)
-    if not torch.isfinite(advantage).all():
-        raise ValueError("有效位置的 advantages 必须有限")
-    surrogate = clipped_policy_surrogate(log_ratio, advantage, epsilon_low, epsilon_high)
+    advantages = torch.where(valid, advantages.detach(), 0.0)
+
+    # 步骤2: 计算 token 重要性比率；padding 在指数计算前置零。
+    old = torch.where(valid, old_log_probs.detach(), 0.0)
+    new = torch.where(valid, new_log_probs, 0.0)
+    ratio = torch.exp(new - old)
+
+    # 步骤3: 非对称截断，取未截断和截断目标中较小的值。
+    clipped_ratio = ratio.clamp(1 - epsilon_low, 1 + epsilon_high)
+    surrogate = torch.minimum(ratio * advantages, clipped_ratio * advantages)
+
+    # 步骤4: 所有有效 token 等权；长回答贡献更多项。
     return -surrogate.sum() / valid.sum().clamp_min(1)

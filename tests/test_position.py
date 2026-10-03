@@ -44,19 +44,9 @@ def test_rope_preserves_input_dtype_after_module_cast(dtype):
     assert rope.cos.dtype == (torch.float64 if dtype == torch.float64 else torch.float32)
 
 
-def test_rope_invalid_dimension_offset_and_input_layout():
-    with pytest.raises(ValueError):
+def test_rope_requires_even_head_dimension():
+    with pytest.raises(AssertionError):
         RotaryEmbedding(3)
-    with pytest.raises(ValueError):
-        RotaryEmbedding(4, max_seq_len=0)
-    with pytest.raises(ValueError):
-        RotaryEmbedding(4, theta=0)
-    rope = RotaryEmbedding(4)
-    q = torch.randn(2, 3, 4, 4)
-    with pytest.raises(ValueError, match="offset"):
-        rope(q, q, offset=-1)
-    with pytest.raises(ValueError, match="head_dim"):
-        rope(q, q[..., :2])
 
 
 def test_rope_explicit_float16_input_inside_bfloat16_autocast():

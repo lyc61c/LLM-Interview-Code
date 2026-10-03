@@ -12,52 +12,39 @@ import math
 
 
 def _prepare_mask(mask, shape, device):
-    """2D [Q,K]、3D [B,Q,K] 或 4D mask；数值 mask 仅接受 0/1。"""
-    if not isinstance(mask, torch.Tensor) or mask.ndim not in (2, 3, 4):
-        raise ValueError("mask must be a tensor with 2, 3 or 4 dimensions")
-    if mask.dtype != torch.bool and not torch.all((mask == 0) | (mask == 1)):
-        raise ValueError("mask must contain only 0/1; additive masks are not supported")
+    """把 [B,Q,K] 补上头维，再将布尔或 0/1 mask 广播到 [B,H,Q,K]。"""
     if mask.ndim == 3:
         mask = mask.unsqueeze(1)
-    try:
-        return torch.broadcast_to(mask.to(device=device, dtype=torch.bool), shape)
-    except RuntimeError as exc:
-        raise ValueError(f"mask shape {tuple(mask.shape)} cannot broadcast to {shape}") from exc
+    return mask.to(device=device, dtype=torch.bool).expand(shape)
 
 
 def scaled_dot_product_attention(q, k, v, mask=None, dropout=None):
     """手写 SDPA，支持 V 的维度不同于 Q/K；全屏蔽行定义为零。
 
+    前提：Q/K/V 为同设备、同浮点 dtype 的 [B,H,T,d] 张量，Q/K 的头维度
+    相同，K/V 的序列长度相同。mask 是可广播的布尔或 0/1 张量。
     fp16/bf16 下用 fp32 计算点积、softmax 和加权和，最后恢复输入 dtype。
     在 softmax 前将全屏蔽行替换为零，随后将屏蔽权重清零，避免
     softmax([-inf, ..., -inf]) 产生 NaN，也避免使用 -1e9 导致半精度溢出。
     """
-    if any(not isinstance(t, torch.Tensor) or t.ndim != 4 for t in (q, k, v)):
-        raise ValueError("q, k, v must have shape [batch, heads, seq_len, dim]")
-    if q.shape[:2] != k.shape[:2] or q.shape[:2] != v.shape[:2]:
-        raise ValueError("q, k, v must have the same batch and head counts")
-    if q.shape[-1] != k.shape[-1] or k.shape[-2] != v.shape[-2]:
-        raise ValueError("Q/K dimensions and K/V sequence lengths must match")
-    if min(q.shape[-2:]) <= 0 or min(k.shape[-2:]) <= 0 or v.shape[-1] <= 0:
-        raise ValueError("sequence lengths and head dimensions must be positive")
-    if not q.is_floating_point() or q.dtype != k.dtype or q.dtype != v.dtype:
-        raise ValueError("q, k, v must have the same floating dtype")
-    if q.device != k.device or q.device != v.device:
-        raise ValueError("q, k, v must be on the same device")
-
+    # 步骤1：半精度提升到 FP32，保留 FP64 输入的精度。
     work_dtype = torch.float32 if q.dtype in (torch.float16, torch.bfloat16) else q.dtype
     # 外层可能启用了 autocast；显式 .float() 不足以防止 matmul 又被降精度。
     with torch.autocast(device_type=q.device.type, enabled=False):
+        # 步骤2：QK^T / sqrt(d_k)，shape 为 [B,H,Q,K]。
         scores = torch.matmul(q.to(work_dtype), k.to(work_dtype).transpose(-2, -1)) / math.sqrt(q.shape[-1])
         allowed = None if mask is None else _prepare_mask(mask, scores.shape, scores.device)
+        # 步骤3：屏蔽无效 key；全屏蔽行先填零，避免 softmax(-inf) 的 NaN。
         if allowed is not None:
             scores = scores.masked_fill(~allowed, float("-inf"))
             scores = scores.masked_fill(~allowed.any(dim=-1, keepdim=True), 0.0)
+        # 步骤4：沿 key 轴归一化，再把屏蔽位置的权重清零。
         weights = F.softmax(scores, dim=-1)
         if allowed is not None:
             weights = weights.masked_fill(~allowed, 0.0)
         if dropout is not None:
             weights = dropout(weights)
+        # 步骤5：用注意力权重对 V 加权求和，shape 为 [B,H,Q,d_v]。
         output = torch.matmul(weights, v.to(work_dtype))
     return output.to(q.dtype), weights.to(q.dtype)
 
@@ -96,7 +83,7 @@ class ScaledDotProductAttention(nn.Module):
             k: 键张量 [batch_size, num_heads, seq_len_k, head_dim]
             v: 值张量 [batch_size, num_heads, seq_len_k, value_dim]
             mask: True/1 允许注意，False/0 屏蔽；支持 [Q,K]、[B,Q,K] 或
-                  可广播到 [B,H,Q,K] 的 4D 张量（不接受 additive mask）
+                  可广播到 [B,H,Q,K] 的 4D 张量；调用者应使用布尔或 0/1 mask
 
         Returns:
             output: 注意力输出 [batch_size, num_heads, seq_len_q, value_dim]

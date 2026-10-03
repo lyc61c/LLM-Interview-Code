@@ -86,14 +86,3 @@ def test_lora_merge_matches_eval_and_preserves_original():
     torch.testing.assert_close(merged(x), layer(x))
     torch.testing.assert_close(layer.weight.weight, original_weight)
     assert not merged.weight.requires_grad
-
-
-def test_lora_merge_rejects_training_dropout():
-    with pytest.raises(ValueError, match="eval"):
-        LoRALinear(4, 3, dropout=0.2).merged_linear()
-
-
-@pytest.mark.parametrize("top_k", [0, 4])
-def test_moe_invalid_top_k(top_k):
-    with pytest.raises(ValueError):
-        MoE(4, 3, top_k)

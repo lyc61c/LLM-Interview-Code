@@ -38,14 +38,11 @@ class ByteBPETokenizer:
         return result
 
     def fit(self, texts, num_merges=256, min_frequency=2):
-        """训练并返回 self；再次 fit 会重置模型。texts 是 str 或 str iterable。"""
-        if isinstance(num_merges, bool) or not isinstance(num_merges, int) or num_merges < 0:
-            raise ValueError("num_merges 必须是非负整数")
-        if isinstance(min_frequency, bool) or not isinstance(min_frequency, int) or min_frequency < 1:
-            raise ValueError("min_frequency 必须是正整数")
-        texts = [texts] if isinstance(texts, str) else list(texts)
-        if not texts or any(not isinstance(text, str) for text in texts):
-            raise ValueError("texts 必须是非空字符串集合（文本本身可为空）")
+        """训练并返回 self；再次 fit 会重置模型。
+
+        texts 是 str 或 str iterable；num_merges>=0，min_frequency>=1。
+        """
+        texts = [texts] if isinstance(texts, str) else texts
         self._reset()
         sequences = [list(text.encode("utf-8")) for text in texts]
         for _ in range(num_merges):
@@ -64,9 +61,7 @@ class ByteBPETokenizer:
         return self
 
     def encode(self, text):
-        """返回 token ID 列表；空字符串返回 []，未见 UTF-8 字节无 OOV。"""
-        if not isinstance(text, str):
-            raise TypeError("text 必须是 str")
+        """text 为 str；返回 token ID 列表，空串返回 []，未见字节无 OOV。"""
         tokens = list(text.encode("utf-8"))
         while len(tokens) > 1:
             available = {pair for pair in zip(tokens, tokens[1:]) if pair in self._ranks}
@@ -77,13 +72,8 @@ class ByteBPETokenizer:
         return tokens
 
     def decode(self, token_ids):
-        """拼接 token 字节后整体解码；非法 ID/无效 UTF-8 直接报错。"""
-        pieces = []
-        for token_id in token_ids:
-            if isinstance(token_id, bool) or not isinstance(token_id, int) or token_id not in self.vocab:
-                raise ValueError(f"未知 token ID: {token_id!r}")
-            pieces.append(self.vocab[token_id])
-        return b"".join(pieces).decode("utf-8")
+        """token_ids 来自此词表，拼接全部字节后统一解码为 UTF-8。"""
+        return b"".join(self.vocab[token_id] for token_id in token_ids).decode("utf-8")
 
     def tokenize(self, text):
         """返回 bytes token；单个 token 未必恰好构成完整 UTF-8 字符。"""

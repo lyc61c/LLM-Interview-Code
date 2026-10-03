@@ -1,5 +1,3 @@
-import pytest
-
 from tokenizer.BPE import ByteBPETokenizer
 
 
@@ -33,17 +31,3 @@ def test_bpe_does_not_merge_across_documents_and_fit_resets():
     assert tokenizer.encode("aaaa") == [256, 256]
     tokenizer.fit([""], num_merges=5)
     assert len(tokenizer.vocab) == 256 and tokenizer.merges == []
-
-
-@pytest.mark.parametrize("kwargs", [{"num_merges": -1}, {"num_merges": True}, {"min_frequency": 0}])
-def test_bpe_rejects_invalid_training_options(kwargs):
-    with pytest.raises(ValueError):
-        ByteBPETokenizer().fit(["abc"], **kwargs)
-
-
-def test_bpe_rejects_unknown_ids_and_invalid_utf8():
-    tokenizer = ByteBPETokenizer()
-    with pytest.raises(ValueError):
-        tokenizer.decode([256])
-    with pytest.raises(UnicodeDecodeError):
-        tokenizer.decode([255])

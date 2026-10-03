@@ -41,13 +41,6 @@ class MultiLatentAttention(nn.Module):
 
     def __init__(self, model_dim, num_heads, head_dim, latent_dim, rope_dim, dropout_p=0.0):
         super().__init__()
-        if any(not isinstance(n, int) or n <= 0 for n in (model_dim, num_heads, head_dim, latent_dim, rope_dim)):
-            raise ValueError("all dimensions must be positive integers")
-        if model_dim % num_heads != 0:
-            raise ValueError("model_dim must be divisible by num_heads")
-        if rope_dim % 2 != 0:
-            raise ValueError("rope_dim must be even")
-
         self.model_dim = model_dim
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -82,8 +75,6 @@ class MultiLatentAttention(nn.Module):
         Returns:
             输出张量 [batch_size, seq_len, model_dim]
         """
-        if not isinstance(x, torch.Tensor) or x.ndim != 3 or x.shape[-1] != self.model_dim or x.shape[1] == 0:
-            raise ValueError("x must have shape [batch, seq_len, model_dim]")
         batch_size, seq_len, _ = x.size()
 
         # ========== KV 投影 ==========

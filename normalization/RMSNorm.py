@@ -21,14 +21,12 @@ class RMSNorm(nn.Module):
     相比 LayerNorm，RMSNorm 不计算均值，计算量更小。
 
     Args:
-        model_dim: 归一化的维度（通常是 model_dim）
-        eps: 数值稳定性常数，防止除零，默认 1e-8
+        model_dim: 归一化的维度，输入最后一维为 model_dim
+        eps: 正的数值稳定性常数，防止除零，默认 1e-8
     """
 
     def __init__(self, model_dim, eps=1e-8):
         super().__init__()
-        if model_dim <= 0 or eps <= 0:
-            raise ValueError("model_dim 与 eps 必须为正")
         self.eps = eps
         self.gamma = nn.Parameter(torch.ones(model_dim))  # 可学习的缩放参数
 
@@ -65,8 +63,6 @@ class RMSNorm(nn.Module):
             归一化后的张量 [batch_size, seq_len, model_dim]
         """
         # x: [batch_size, seq_len, model_dim]
-        if not x.is_floating_point() or x.ndim == 0 or x.shape[-1] != self.gamma.numel():
-            raise ValueError("x 必须是最后一维为 model_dim 的浮点张量")
         normed_x = self._norm(x)
 
         # 恢复原始数据类型并应用缩放参数

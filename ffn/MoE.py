@@ -26,12 +26,11 @@ class MoE(nn.Module):
         model_dim: 输入/输出维度
         num_experts: 专家数量
         top_k: 每个 token 激活的专家数量
+               前提：model_dim、num_experts 为正，1 <= top_k <= num_experts。
     """
 
     def __init__(self, model_dim, num_experts, top_k):
         super().__init__()
-        if model_dim <= 0 or num_experts <= 0 or not 1 <= top_k <= num_experts:
-            raise ValueError("model_dim、num_experts 必须为正，且 1 <= top_k <= num_experts")
         self.model_dim = model_dim
         self.num_experts = num_experts
         self.top_k = top_k
@@ -59,8 +58,6 @@ class MoE(nn.Module):
         Returns:
             output: 专家混合输出 [batch_size, seq_len, model_dim]
         """
-        if x.ndim != 3 or x.shape[-1] != self.model_dim:
-            raise ValueError("x 必须是 [batch_size, seq_len, model_dim]")
         batch_size, seq_len, model_dim = x.shape
 
         # 展平 batch 和 seq 维度以便处理

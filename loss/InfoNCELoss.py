@@ -1,10 +1,8 @@
-"""使用批内负样本的 InfoNCE：第 i 个 query 与第 i 个 key 为正样本。
+"""批内负样本 InfoNCE：第 i 个 query 与第 i 个 key 构成正样本。
 
-参考 CPC（2018）https://arxiv.org/abs/1807.03748
-仅适用于每行一个正样本的成对输入；相同语义的其他行会成为假负样本。
+其余配对作为负样本；相同语义的其他行可能成为假负样本。
 """
 
-import math
 import torch
 from torch import nn
 
@@ -12,58 +10,40 @@ from .EntropyLoss import cross_entropy_loss
 
 
 def info_nce_loss(queries, keys, temperature=0.1, symmetric=False):
-    """输入 queries/keys: [B, D]；返回 scalar。
+    """输入相同的非空浮点 [B,D] 特征，temperature 为正，返回标量。
 
-    s_ij = cosine(q_i,k_j)/temperature，L_qk = mean_i[-log softmax(s_i)_i]。
-    symmetric=True 时返回 (L_qk+L_kq)/2。B=1 没有负样本，损失为 0。
-    范数、温度缩放或损失超出计算 dtype 范围时抛 ValueError。
+    s_ij=cosine(q_i,k_j)/temperature，L=-mean_i log softmax(s_i)_i。
+    symmetric=True 时平均 q→k 与 k→q 两个方向；B=1 时没有负样本，损失为 0。
+    假设特征范数和温度缩放处于计算精度可表示的范围。
     """
-    if queries.ndim != 2 or queries.shape != keys.shape or queries.shape[0] == 0 or queries.shape[1] == 0:
-        raise ValueError("queries、keys 必须是相同的非空 [B, D] 张量")
-    if queries.device != keys.device or not queries.is_floating_point() or not keys.is_floating_point():
-        raise ValueError("queries、keys 必须是同设备的浮点张量")
-    if not math.isfinite(temperature) or temperature <= 0:
-        raise ValueError("temperature 必须为正且有限")
-    if not torch.isfinite(queries).all() or not torch.isfinite(keys).all():
-        raise ValueError("特征必须有限")
     if queries.dtype in (torch.float16, torch.bfloat16):
         queries = queries.float()
-    if keys.dtype in (torch.float16, torch.bfloat16):
         keys = keys.float()
-    if queries.dtype != keys.dtype:
-        raise ValueError("queries、keys 必须具有相同 dtype")
-    if temperature < 1 / torch.finfo(queries.dtype).max:
-        raise ValueError("temperature 的倒数超出计算 dtype 可表示范围")
-    # autocast 可能把 matmul 再降为半精度，导致 temperature 缩放时溢出。
-    # 归一化与相似度/CE 均保留上面确定的 float32 或 float64 计算精度。
+
+    # 在当前计算精度下归一化、做点积；避免 autocast 再降低点积精度。
     with torch.autocast(device_type=queries.device.type, enabled=False):
-        query_norms = queries.norm(dim=-1, keepdim=True)
-        key_norms = keys.norm(dim=-1, keepdim=True)
-        if not torch.isfinite(query_norms).all() or not torch.isfinite(key_norms).all():
-            raise ValueError("特征范数超出计算 dtype 可表示范围")
-        # clamp_min 允许零向量输入：其归一化结果仍为零，不会出现除零。
-        queries = queries / query_norms.clamp_min(1e-12)
-        keys = keys / key_norms.clamp_min(1e-12)
+        # 步骤1: L2 归一化，clamp_min 使零向量不会除零。
+        queries = queries / queries.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        keys = keys / keys.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+
+        # 步骤2: 计算所有配对的相似度，正样本位于对角线。
         similarities = queries @ keys.T / temperature
-        if not torch.isfinite(similarities).all():
-            raise ValueError("temperature 缩放后的相似度超出计算 dtype 可表示范围")
         targets = torch.arange(queries.shape[0], device=queries.device)
+
+        # 步骤3: 每行以第 i 类为目标做 CE，可选对两个方向取平均。
         loss = cross_entropy_loss(similarities, targets)
         if symmetric:
             loss = (loss + cross_entropy_loss(similarities.T, targets)) / 2
-        if not torch.isfinite(loss):
-            raise ValueError("InfoNCE 损失超出计算 dtype 可表示范围")
     return loss
 
 
 class InfoNCELoss(nn.Module):
-    """函数版的 nn.Module 封装，可放入训练代码。"""
+    """info_nce_loss 的模块封装。"""
 
     def __init__(self, temperature=0.1, symmetric=False):
         super().__init__()
-        if not math.isfinite(temperature) or temperature <= 0:
-            raise ValueError("temperature 必须为正且有限")
-        self.temperature, self.symmetric = temperature, symmetric
+        self.temperature = temperature
+        self.symmetric = symmetric
 
     def forward(self, queries, keys):
         return info_nce_loss(queries, keys, self.temperature, self.symmetric)

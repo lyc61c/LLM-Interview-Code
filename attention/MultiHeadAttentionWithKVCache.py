@@ -46,45 +46,43 @@ class MultiHeadAttentionWithKVCache(MultiHeadAttention):
               用户 mask 总与自动生成的偏移 causal mask 取交集。
         output: [B,Q,model_dim]；present: 包含历史与新 token 的 (K,V)。
 
+        前提：输入形状和模型维度匹配，历史缓存来自同一个模型；
+        缓存与新投影 K/V 的 batch、头数、头维度、dtype 和 device 一致。
+
         等价性对照应使用 eval() 或 dropout_p=0；训练时不自动 detach 缓存，
         因而梯度可沿历史 K/V 回传。推理调用者通常使用 torch.no_grad()。
         """
-        if not isinstance(x, torch.Tensor) or x.ndim != 3 or x.shape[-1] != self.model_dim or x.shape[1] == 0:
-            raise ValueError("x must have shape [batch, positive_query_len, model_dim]")
         batch, query_len, _ = x.shape
+        # 步骤1：历史序列有多长，新 token 的绝对位置就从哪里开始。
         past_len = 0
         if past_key_value is not None:
-            if not isinstance(past_key_value, (tuple, list)) or len(past_key_value) != 2:
-                raise ValueError("past_key_value must be a pair (past_k, past_v)")
             past_k, past_v = past_key_value
-            if any(not isinstance(t, torch.Tensor) or t.ndim != 4 for t in (past_k, past_v)):
-                raise ValueError("cached K/V must have shape [batch, heads, past_len, head_dim]")
-            if past_k.shape != past_v.shape or past_k.shape[:2] != (batch, self.num_heads) or past_k.shape[-1] != self.head_dim:
-                raise ValueError("cached K/V shapes must match the input batch, heads and head_dim")
-            if past_k.device != x.device or past_v.device != x.device:
-                raise ValueError("cached K/V must be on the input device")
             past_len = past_k.shape[-2]
 
-        # [B,Q,M] -> [B,Q,H,D]；先旋转新 token，再转成缓存布局。
+        # 步骤2：仅投影本轮新增 token，[B,Q,M] -> [B,Q,H,D]。
         q = self.w_q(x).view(batch, query_len, self.num_heads, self.head_dim)
         k = self.w_k(x).view(batch, query_len, self.num_heads, self.head_dim)
         v = self.w_v(x).view(batch, query_len, self.num_heads, self.head_dim)
+        # 步骤3：按绝对位置旋转新 Q/K，再转成 [B,H,Q,D] 缓存布局。
         if self.rope is not None:
             q, k = self.rope(q, k, offset=past_len)
-        q, k, v = (t.transpose(1, 2) for t in (q, k, v))
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        # 步骤4：在历史 K/V 之后追加本轮 K/V。
         if past_key_value is not None:
-            # autocast 下投影 dtype 可与 x 不同，故与实际投影结果比较。
-            if past_k.dtype != k.dtype or past_v.dtype != v.dtype:
-                raise ValueError("cached K/V dtype must match the current projected K/V dtype")
+            # 缓存已旋转的历史 K；沿序列维拼接新 K/V，不重复投影历史 token。
             k = torch.cat((past_k, k), dim=-2)
             v = torch.cat((past_v, v), dim=-2)
         present_key_value = (k, v)
 
+        # 步骤5：按偏移构造 causal mask，并与用户的 padding 等 mask 合并。
         key_len = past_len + query_len
         causal = create_causal_mask(query_len, key_len, past_len, x.device)
         if mask is not None:
             causal = causal & _prepare_mask(mask, (batch, self.num_heads, query_len, key_len), x.device)
         context, _ = scaled_dot_product_attention(q, k, v, causal, self.dropout)
+        # 步骤6：合头、输出投影；全屏蔽 query 的最终输出仍设为零。
         context = context.transpose(1, 2).contiguous().view(batch, query_len, self.model_dim)
         output = self.w_o(context)
         output = zero_fully_masked_queries(output, causal, self.num_heads, key_len)

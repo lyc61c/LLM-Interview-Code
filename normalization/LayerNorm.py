@@ -18,14 +18,12 @@ class LayerNorm(nn.Module):
     公式: LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 
     Args:
-        model_dim: 归一化的特征维度
-        eps: 数值稳定性常数，防止除零，默认 1e-5
+        model_dim: 归一化的特征维度，输入最后一维为 model_dim
+        eps: 正的数值稳定性常数，防止除零，默认 1e-5
     """
 
     def __init__(self, model_dim, eps=1e-5):
         super().__init__()
-        if model_dim <= 0 or eps <= 0:
-            raise ValueError("model_dim 与 eps 必须为正")
         self.eps = eps
         self.gamma = nn.Parameter(torch.ones(model_dim))   # 可学习的缩放参数
         self.beta = nn.Parameter(torch.zeros(model_dim))   # 可学习的偏移参数
@@ -40,8 +38,6 @@ class LayerNorm(nn.Module):
         Returns:
             归一化后的张量 [batch_size, seq_len, model_dim]
         """
-        if not x.is_floating_point() or x.ndim == 0 or x.shape[-1] != self.gamma.numel():
-            raise ValueError("x 必须是最后一维为 model_dim 的浮点张量")
         # 半精度先在 FP32 中统计；FP64 保留精度，便于数值梯度验证。
         stats_x = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
 

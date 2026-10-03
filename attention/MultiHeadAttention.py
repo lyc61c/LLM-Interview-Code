@@ -23,17 +23,14 @@ class MultiHeadAttention(nn.Module):
 
     Args:
         model_dim: 模型隐藏维度
-        num_heads: 注意力头数
+        num_heads: 注意力头数，model_dim 必须能被它整除
         dropout_p: Dropout 概率，默认 0.0
     """
 
     def __init__(self, model_dim, num_heads, dropout_p=0.0):
         super().__init__()
 
-        if not isinstance(model_dim, int) or not isinstance(num_heads, int) or model_dim <= 0 or num_heads <= 0:
-            raise ValueError("model_dim and num_heads must be positive integers")
-        if model_dim % num_heads != 0:
-            raise ValueError("model_dim must be divisible by num_heads")
+        assert model_dim % num_heads == 0, "model_dim must be divisible by num_heads"
 
         self.model_dim = model_dim
         self.num_heads = num_heads
@@ -63,15 +60,6 @@ class MultiHeadAttention(nn.Module):
         Returns:
             output: 注意力输出 [batch_size, seq_len_q, model_dim]
         """
-        if not isinstance(x_query, torch.Tensor) or x_query.ndim != 3 or x_query.shape[-1] != self.model_dim or x_query.shape[1] == 0:
-            raise ValueError("x_query must have shape [batch, query_len, model_dim]")
-        if x_context is not None:
-            if not isinstance(x_context, torch.Tensor) or x_context.ndim != 3 or x_context.shape[-1] != self.model_dim or x_context.shape[1] == 0:
-                raise ValueError("x_context must have shape [batch, key_len, model_dim]")
-            if x_query.shape[0] != x_context.shape[0]:
-                raise ValueError("x_query and x_context must have the same batch size")
-            if x_query.dtype != x_context.dtype or x_query.device != x_context.device:
-                raise ValueError("x_query and x_context must have the same dtype and device")
         batch_size = x_query.size(0)
 
         # ========== 线性投影 ==========
