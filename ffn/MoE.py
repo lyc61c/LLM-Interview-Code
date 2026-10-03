@@ -26,7 +26,6 @@ class MoE(nn.Module):
         model_dim: 输入/输出维度
         num_experts: 专家数量
         top_k: 每个 token 激活的专家数量
-               前提：model_dim、num_experts 为正，1 <= top_k <= num_experts。
     """
 
     def __init__(self, model_dim, num_experts, top_k):
@@ -62,8 +61,7 @@ class MoE(nn.Module):
 
         # 展平 batch 和 seq 维度以便处理
         # x_flat: [batch_size * seq_len, model_dim]
-        # transpose 等操作会产生非连续张量；reshape 会在必要时复制。
-        x_flat = x.reshape(-1, model_dim)
+        x_flat = x.view(-1, model_dim)
 
         # 步骤1: 路由器计算每个 token 对每个专家的得分
         # gate_logits: [batch_size * seq_len, num_experts]

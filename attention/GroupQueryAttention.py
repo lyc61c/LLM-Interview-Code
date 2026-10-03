@@ -9,10 +9,8 @@
 
 import torch
 import torch.nn as nn
-try:
-    from .ScaledDotProductAttention import scaled_dot_product_attention, zero_fully_masked_queries
-except ImportError:  # 兼容直接运行此文件
-    from ScaledDotProductAttention import scaled_dot_product_attention, zero_fully_masked_queries
+import torch.nn.functional as F
+import math
 
 
 class GroupQueryAttention(nn.Module):
@@ -97,8 +95,7 @@ class GroupQueryAttention(nn.Module):
 
         Args:
             x: 输入张量 [batch_size, seq_len, model_dim]
-            mask: True/1 允许注意，False/0 屏蔽；可广播到 [B,H,T,T]。
-                  全屏蔽 query 的输出为零。默认不自动添加 causal mask。
+            mask: 注意力掩码 [batch_size, 1, seq_len, seq_len] 或 [1, 1, seq_len, seq_len]
 
         Returns:
             output: 注意力输出 [batch_size, seq_len, model_dim]
@@ -128,8 +125,19 @@ class GroupQueryAttention(nn.Module):
         v = self.repeat_kv(v, self.num_rep)
 
         # ========== 计算注意力得分 ==========
-        # GQA 的分数缩放仍为 sqrt(head_dim)，不是 sqrt(model_dim)。
-        context, _ = scaled_dot_product_attention(q, k, v, mask, self.dropout)
+        # scores: [batch_size, num_heads, seq_len, seq_len]
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+
+        # attn_weights: [batch_size, num_heads, seq_len, seq_len]
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # ========== 计算上下文向量 ==========
+        # context: [batch_size, num_heads, seq_len, head_dim]
+        context = torch.matmul(attn_weights, v)
 
         # ========== 拼接多头 ==========
         # [batch_size, num_heads, seq_len, head_dim] -> [batch_size, seq_len, num_heads, head_dim]
@@ -140,4 +148,4 @@ class GroupQueryAttention(nn.Module):
         output = context.view(batch_size, seq_len, self.model_dim)
         output = self.w_o(output)
 
-        return zero_fully_masked_queries(output, mask, self.num_heads, seq_len)
+        return output

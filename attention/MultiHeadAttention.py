@@ -7,10 +7,8 @@ Transformer 的核心组件，通过并行运行多个注意力头来捕捉不�
 
 import torch
 import torch.nn as nn
-try:
-    from .ScaledDotProductAttention import scaled_dot_product_attention, zero_fully_masked_queries
-except ImportError:  # 兼容 python attention/MultiHeadAttention.py
-    from ScaledDotProductAttention import scaled_dot_product_attention, zero_fully_masked_queries
+import torch.nn.functional as F
+import math
 
 
 class MultiHeadAttention(nn.Module):
@@ -23,7 +21,7 @@ class MultiHeadAttention(nn.Module):
 
     Args:
         model_dim: 模型隐藏维度
-        num_heads: 注意力头数，model_dim 必须能被它整除
+        num_heads: 注意力头数
         dropout_p: Dropout 概率，默认 0.0
     """
 
@@ -46,7 +44,7 @@ class MultiHeadAttention(nn.Module):
 
         self.dropout = nn.Dropout(dropout_p)
 
-    def forward(self, x_query, x_context=None, mask=None):
+    def forward(self, x_query, x_context, mask=None):
         """
         前向传播
 
@@ -54,8 +52,7 @@ class MultiHeadAttention(nn.Module):
             x_query: 查询输入 [batch_size, seq_len_q, model_dim]
             x_context: 上下文输入（用于生成 K 和 V）[batch_size, seq_len_k, model_dim]
                        如果为 None，则使用 x_query（自注意力）
-            mask: True/1 允许注意，False/0 屏蔽；可广播到 [B,H,Q,K]。
-                  全屏蔽 query 的输出为零。默认不自动添加 causal mask。
+            mask: 注意力掩码 [batch_size, 1, seq_len_q, seq_len_k] 或 [1, 1, seq_len_q, seq_len_k]
 
         Returns:
             output: 注意力输出 [batch_size, seq_len_q, model_dim]
@@ -76,24 +73,35 @@ class MultiHeadAttention(nn.Module):
 
         # ========== 分头处理 ==========
         # [batch_size, seq_len, model_dim] -> [batch_size, seq_len, num_heads, head_dim] -> [batch_size, num_heads, seq_len, head_dim]
-        q = q.view(batch_size, q.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, k.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, v.shape[1], self.num_heads, self.head_dim).transpose(1, 2)
+        q = q.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
 
         # ========== 缩放点积注意力 ==========
-        # softmax(QK^T / sqrt(d)) V；共享实现处理半精度及全屏蔽行。
-        context, _ = scaled_dot_product_attention(q, k, v, mask, self.dropout)
+        # scores: [batch_size, num_heads, seq_len_q, seq_len_k]
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+        # 应用注意力掩码
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+
+        # attn_weights: [batch_size, num_heads, seq_len_q, seq_len_k]
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # context: [batch_size, num_heads, seq_len_q, head_dim]
+        context = torch.matmul(attn_weights, v)
 
         # ========== 合并多头 ==========
         # [batch_size, num_heads, seq_len_q, head_dim] -> [batch_size, seq_len_q, num_heads, head_dim] -> [batch_size, seq_len_q, model_dim]
         context = context.transpose(1, 2)
         context = context.contiguous()
-        output = context.view(batch_size, x_query.shape[1], self.model_dim)
+        output = context.view(batch_size, -1, self.model_dim)
 
         # 输出投影
         output = self.w_o(output)
 
-        return zero_fully_masked_queries(output, mask, self.num_heads, k.shape[-2])
+        return output
 
 
 if __name__ == "__main__":

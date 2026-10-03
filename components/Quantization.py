@@ -1,63 +1,37 @@
-"""逐张量 INT8 量化：q=clamp(round(x/scale)+zero_point)，x̂=(q-zp)·scale。
-
-仅用于展示量化数学：不实现校准、逐通道量化、QAT 或 INT8 矩阵乘 kernel。
-量化张量真正存为 torch.int8；参数与反量化在 FP32 中计算。
-round 使用 PyTorch 的四舍六入五成双；量化是不可微的离散操作。
-前提：输入是非空浮点 Tensor，数值有限并处于普通 FP32 可计算范围。
-"""
-
-from dataclasses import dataclass
+"""逐张量 INT8 量化：q=round(x/scale)+zero_point，x̂=(q-zero_point)*scale。"""
 
 import torch
 
 
-@dataclass(frozen=True)
-class Int8Quantized:
-    values: torch.Tensor       # 输入形状，torch.int8
-    scale: torch.Tensor        # 标量，torch.float32，严格为正
-    zero_point: torch.Tensor   # 标量，torch.int64，整数零点
-
-
 def symmetric_quantize(x):
-    """对称 INT8，q∈[-127,127]，zp=0，scale=max(abs(x))/127。
-
-    不使用 -128，使正负范围完全对称。全零张量取 scale=1。
-    """
-    x = x.detach().float()
-    scale = x.abs().max() / 127
+    """对称范围 [-127,127]；返回 (整数张量, scale, zero_point)。"""
+    scale = x.abs().max().item() / 127
     if scale == 0:
-        scale = torch.ones_like(scale)
-    zp = torch.zeros((), dtype=torch.int64, device=x.device)
+        scale = 1.0
     values = torch.round(x / scale).clamp(-127, 127).to(torch.int8)
-    return Int8Quantized(values, scale, zp)
+    return values, scale, 0
 
 
 def asymmetric_quantize(x):
-    """非对称 INT8，q∈[-128,127]，采用整数 zero_point。
-
-    min/max 范围先扩展到包含 0，再计算 scale=(max-min)/255，
-    zp=clamp(round(-128-min/scale), -128,127)。这样正/负常数也能量化，
-    并且 x=0 总能精确反量化为 0。全零取 scale=1、zp=-128。
-    """
-    x = x.detach().float()
-    minimum = x.min().clamp_max(0)
-    maximum = x.max().clamp_min(0)
+    """非对称范围 [-128,127]，先将浮点范围扩展到包含零。"""
+    minimum = min(x.min().item(), 0.0)
+    maximum = max(x.max().item(), 0.0)
     scale = (maximum - minimum) / 255
     if scale == 0:
-        scale = torch.ones_like(scale)
-    zp = torch.round(-128 - minimum / scale).clamp(-128, 127).to(torch.int64)
+        scale = 1.0
+    zp = max(-128, min(127, round(-128 - minimum / scale)))
     values = (torch.round(x / scale) + zp).clamp(-128, 127).to(torch.int8)
-    return Int8Quantized(values, scale, zp)
+    return values, scale, zp
 
 
-def dequantize(quantized):
+def dequantize(values, scale, zero_point=0):
     """重建与输入同形状的 FP32 Tensor，不会还原量化丢失的信息。"""
-    return (quantized.values.float() - quantized.zero_point.float()) * quantized.scale
+    return (values.float() - zero_point) * scale
 
 
 if __name__ == "__main__":
     values = torch.tensor([-2., -.3, 0., 1.2, 3.])
     for quantize in (symmetric_quantize, asymmetric_quantize):
-        result = quantize(values)
-        print(quantize.__name__, result.values, "scale:", result.scale.item(),
-              "zero_point:", result.zero_point.item(), "reconstructed:", dequantize(result))
+        quantized, scale, zero_point = quantize(values)
+        print(quantize.__name__, quantized, "scale:", scale, "zero_point:", zero_point)
+        print("reconstructed:", dequantize(quantized, scale, zero_point))

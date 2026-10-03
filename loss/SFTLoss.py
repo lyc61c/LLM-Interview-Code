@@ -1,32 +1,66 @@
-"""监督微调：先屏蔽 prompt 标签，再做 next-token shift。"""
+"""
+监督微调损失（Supervised Fine-Tuning Loss）
+
+用于大语言模型监督微调的损失函数。
+与预训练损失类似，但支持屏蔽 prompt 部分，只计算 response 的损失。
+"""
 
 import torch
-from torch import nn
-from torch.nn import functional as F
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SFTLoss(nn.Module):
-    """logits [B,T,V]、整数 labels [B,T]，prompt_lengths 为 [B] 整数或列表。
+    """
+    监督微调损失模块
 
-    prompt 长度由调用者保证在 0..T 范围内；已有 -100 padding 标签继续忽略。
+    在 SFT 阶段，我们通常只希望计算 response 部分的损失，
+    而不计算 prompt 部分的损失。该模块支持通过 prompt_lengths 来屏蔽 prompt。
+
+    Args:
+        无
     """
 
+    def __init__(self):
+        super().__init__()
+
     def forward(self, logits, labels, prompt_lengths):
-        # 步骤1: 复制 labels，只保留 response 的监督信号，不修改原输入。
+        """
+        前向传播
+
+        Args:
+            logits: 模型输出的未归一化对数概率 [batch_size, seq_len, vocab_size]
+            labels: 真实词元索引 [batch_size, seq_len]
+            prompt_lengths: 每个样本的 prompt 长度 [batch_size]
+
+        Returns:
+            loss: 标量损失值
+        """
+        # 步骤1: 构造 masked labels
+        # 将 prompt 部分的标签设为 -100（ignore_index）
         masked_labels = labels.clone()
         for batch_idx, prompt_length in enumerate(prompt_lengths):
-            masked_labels[batch_idx, :prompt_length] = -100
+            masked_labels[batch_idx, :prompt_length] = -100  # 设置为 ignore_index
 
-        # 步骤2: next-token shift，将当前位置的 logits 与下一个 label 对齐。
-        shifted_logits = logits[:, :-1, :]
-        shifted_labels = masked_labels[:, 1:]
-        valid = shifted_labels != -100
+        # 步骤2: 移位操作（Shift）
+        # 预测下一个词：logits 去掉最后一个，labels 去掉第一个
+        # shifted_logits: [batch_size, seq_len-1, vocab_size]
+        shifted_logits = logits[:, :-1, :].contiguous()
 
-        # 步骤3: 忽略行先置零，再展平计算 CE。
-        shifted_logits = torch.where(valid.unsqueeze(-1), shifted_logits, 0.0)
-        flat_logits = shifted_logits.reshape(-1, logits.shape[-1])
-        flat_labels = shifted_labels.reshape(-1)
-        loss_sum = F.cross_entropy(flat_logits, flat_labels, ignore_index=-100, reduction="sum")
+        # shifted_labels: [batch_size, seq_len-1]
+        shifted_labels = masked_labels[:, 1:].contiguous()
 
-        # 步骤4: response 的有效 token 等权；全忽略时返回可导的 0。
-        return loss_sum / valid.sum().clamp_min(1)
+        # 步骤3: 展平张量
+        batch_size, seq_length, vocab_size = shifted_logits.size()
+
+        # flattened_logits: [batch_size * (seq_len-1), vocab_size]
+        flattened_logits = shifted_logits.view(-1, vocab_size)
+
+        # flattened_labels: [batch_size * (seq_len-1)]
+        flattened_labels = shifted_labels.view(-1)
+
+        # 步骤4: 计算交叉熵损失
+        # ignore_index=-100 的位置（prompt 部分）不参与损失计算
+        loss = F.cross_entropy(flattened_logits, flattened_labels, ignore_index=-100)
+
+        return loss

@@ -21,8 +21,8 @@ class RMSNorm(nn.Module):
     相比 LayerNorm，RMSNorm 不计算均值，计算量更小。
 
     Args:
-        model_dim: 归一化的维度，输入最后一维为 model_dim
-        eps: 正的数值稳定性常数，防止除零，默认 1e-8
+        model_dim: 归一化的维度（通常是 model_dim）
+        eps: 数值稳定性常数，防止除零，默认 1e-8
     """
 
     def __init__(self, model_dim, eps=1e-8):
@@ -42,15 +42,14 @@ class RMSNorm(nn.Module):
         """
         # 计算均方值
         # mean_square: [batch_size, seq_len, 1]
-        stats_x = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
-        mean_square = stats_x.pow(2).mean(-1, keepdim=True)
+        mean_square = x.float().pow(2).mean(-1, keepdim=True)
 
         # 计算 1/sqrt(x)，即 RMS 的倒数
         # rsqrt: [batch_size, seq_len, 1]
         rsqrt = torch.rsqrt(mean_square + self.eps)
 
         # 归一化
-        return stats_x * rsqrt
+        return x.float() * rsqrt
 
     def forward(self, x):
         """
@@ -66,4 +65,4 @@ class RMSNorm(nn.Module):
         normed_x = self._norm(x)
 
         # 恢复原始数据类型并应用缩放参数
-        return (normed_x * self.gamma).to(x.dtype)
+        return normed_x.type_as(x) * self.gamma

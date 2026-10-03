@@ -18,8 +18,8 @@ class LayerNorm(nn.Module):
     公式: LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 
     Args:
-        model_dim: 归一化的特征维度，输入最后一维为 model_dim
-        eps: 正的数值稳定性常数，防止除零，默认 1e-5
+        model_dim: 归一化的特征维度
+        eps: 数值稳定性常数，防止除零，默认 1e-5
     """
 
     def __init__(self, model_dim, eps=1e-5):
@@ -38,22 +38,21 @@ class LayerNorm(nn.Module):
         Returns:
             归一化后的张量 [batch_size, seq_len, model_dim]
         """
-        # 半精度先在 FP32 中统计；FP64 保留精度，便于数值梯度验证。
-        stats_x = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+        # x: [batch_size, seq_len, model_dim]
 
         # 计算均值
         # mean: [batch_size, seq_len, 1]
-        mean = stats_x.mean(-1, keepdim=True)
+        mean = x.mean(-1, keepdim=True)
 
         # 计算方差
         # 【面试大坑】torch.var 默认是 unbiased=True（除以 N-1）
         # 但 LayerNorm 的定义通常是除以 N（unbiased=False）
         # var: [batch_size, seq_len, 1]
-        var = stats_x.var(-1, keepdim=True, unbiased=False)
+        var = x.var(-1, keepdim=True, unbiased=False)
 
         # 归一化：零均值、单位方差
         # x_normalized: [batch_size, seq_len, model_dim]
-        x_normalized = (stats_x - mean) * torch.rsqrt(var + self.eps)
+        x_normalized = (x - mean) / torch.sqrt(var + self.eps)
 
         # 应用可学习的仿射变换
-        return (x_normalized * self.gamma + self.beta).to(x.dtype)
+        return x_normalized * self.gamma + self.beta

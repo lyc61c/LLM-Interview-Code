@@ -87,9 +87,7 @@ SiLU 将原输入与这个开度相乘，保留平滑的变化。
 
 **实现思路**
 
-先计算 Sigmoid，再用 `x * sigmoid(x)` 得到 SiLU。
-为避免对很大的负输入计算 `exp(-x)`，Sigmoid 按符号选择等价的稳定表达式。
-零点处两者的导数分别为 $1/4$ 和 $1/2$。
+直接用 `1 / (1 + torch.exp(-x))` 计算 Sigmoid，再用 `x * sigmoid(x)` 得到 SiLU。
 
 **代码：[Activation.py](components/Activation.py)**
 
@@ -156,7 +154,7 @@ $$\mathrm{Attention}(Q,K,V)=\mathrm{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)
 
 Q、K、V 分别为 `[B,H,Q,d_k]`、`[B,H,K,d_k]`、`[B,H,K,d_v]`。
 先得到 `[B,H,Q,K]` 的分数，应用 mask，再沿 key 轴做 softmax，最后乘 V。
-mask 统一使用 **True / 1 = 允许注意**；全屏蔽行的权重与输出为零。
+mask 统一使用 **True / 1 = 允许注意**，在分数上将屏蔽位置填为 `-1e9`。
 
 <details>
 <summary>自注意力的张量形状示意</summary>
@@ -197,7 +195,7 @@ $W^O$ 是输出投影。各头独立计算权重，拼接后恢复模型维度�
 
 按“线性投影 → 分头 → 缩放点积注意力 → 合头 → 输出投影”实现。
 分头使用 `reshape` 后接 `transpose`，合头时执行相反的轴变换。
-未传 `x_context` 时使用自注意力；传入时由 Query 输入与上下文分别生成 Q 和 K/V。
+`x_context=None` 时使用自注意力；传入上下文时分别生成 Q 和 K/V。
 因果约束通过 mask 提供。
 
 <details>
@@ -339,7 +337,7 @@ mask 用一个允许矩阵，把这些规则写进注意力分数。
 
 $$M_{qk}^{causal}=\mathbf1[k\le past\_len+q]$$
 
-$$M=M^{causal}\land M^{key\ padding}\land M^{query\ padding}$$
+$$M=M^{causal}\land M^{key\ padding}$$
 
 $q$ 是本轮 query 的相对下标，$k$ 是完整 key 序列的下标，$past\_len$ 是缓存长度。
 $\mathbf1[\cdot]$ 表示条件成立时取 1；逻辑与表示同时满足各个约束。
@@ -349,8 +347,7 @@ $\mathbf1[\cdot]$ 表示条件成立时取 1；逻辑与表示同时满足各个
 
 Padding mask 从 `input_ids != pad_token_id` 构造，causal mask 用位置比较构造。
 合并后得到可广播到各头的 `[B,1,Q,K]`，**True / 1 表示允许注意**。
-缓存解码的 `input_ids` 包含历史和本轮 token；默认同时屏蔽 padding query，
-`mask_query_padding=False` 时只屏蔽 padding key。
+缓存解码的 `input_ids` 包含历史和本轮 token，Padding Mask 屏蔽作为 Key 的补齐位置。
 
 **代码：[AttentionMask.py](attention/AttentionMask.py)**
 
@@ -374,7 +371,7 @@ Concat 沿序列维追加，新 Query 只对应本轮输入。
 **实现思路**
 
 首轮 prefill 计算完整输入的 K/V；后续 decode 只计算新 Q/K/V。
-RoPE 使用 `offset=past_len`，因果 mask 同样按历史长度偏移。
+RoPE 从固定频率表中取 `cos[past_len:past_len+query_len]` 和对应的 sin，因果 mask 按历史长度偏移。
 `forward` 返回 `(output, (K, V))`，缓存形状为 `[B,H,T,d]`。
 在 `eval()` 下，完整前向与逐 token / 分块解码的结果应一致。
 
@@ -403,7 +400,7 @@ $\epsilon$ 避免分母为零，$\gamma$ 与 $\beta$ 是可学习的缩放和偏
 
 沿最后一维分别计算 mean 和 var，保留维度便于广播。
 方差使用 `unbiased=False`，然后依次中心化、缩放、应用仿射参数。
-半精度统计量提升到 FP32，输入和输出的形状相同。
+输入和输出的形状相同。
 
 <details>
 <summary>张量形状示意</summary>
@@ -489,7 +486,7 @@ $\odot$ 表示逐元素乘法。
 
 本实现把前后半区的特征配对，`rotate_half(x) = [-x后半, x前半]`，所以头维度为偶数。
 先构造位置与频率的外积，再取 cos / sin，应用到 `[B,T,H,d]` 的 Q/K。
-缓存解码用 `offset=past_len` 选择位置，频率表按需要扩展。
+原实现使用固定长度的频率表，普通前向取 `cos[:seq_len]` 与 `sin[:seq_len]`。
 
 <details>
 <summary>张量形状示意</summary>
@@ -498,7 +495,7 @@ $\odot$ 表示逐元素乘法。
 flowchart TD
     QK["输入 Q, K: [batch, seq_len, num_heads, head_dim]"]
     Precompute["预计算 cos, sin: [max_seq_len, head_dim]"]
-    Precompute --> Slice["取当前序列长度: cos[offset:offset+seq_len], sin[offset:offset+seq_len]<br/>[1, seq_len, 1, head_dim]"]
+    Precompute --> Slice["取当前序列长度: cos[:seq_len], sin[:seq_len]<br/>[1, seq_len, 1, head_dim]"]
     QK --> Rotate["rotate_half(Q) = [-Q后半, Q前半]"]
     Slice --> Apply["Q_rotated = Q * cos + rotate_half(Q) * sin<br/>K_rotated = K * cos + rotate_half(K) * sin"]
     Rotate --> Apply
@@ -641,25 +638,20 @@ flowchart TD
 
 **背景与动机**
 
-交叉熵衡量模型预测分布与目标之间的差异。硬标签指定一个正确类别，
-软标签则给出完整的目标概率分布，可用于蒸馏或标签平滑。
+交叉熵衡量模型预测分布与正确类别之间的差异，正确类别的预测概率越高，损失越小。
 
 **核心公式**
 
 $$\mathrm{CE}(z,y)=-\log p_y,\qquad p=\mathrm{softmax}(z)$$
 
-$$\mathrm{CE}(z,q)=-\sum_jq_j\log p_j$$
-
-z 是模型的 logits，y 是正确类别下标，q 是目标分布。
-硬标签相当于 one-hot 分布，只有正确类别的项保留下来。
+z 是模型的 logits，y 是正确类别下标。
+类别标签相当于 one-hot 分布，只有正确类别的项保留下来。
 正确类别的预测概率越高，负 log 概率越小。
 
 **实现思路**
 
-先做 LogSoftmax；硬标签用 `gather` 取目标类别，软标签做逐类加权求和。
-logits 为 `[...,C]`，硬标签为 `[...]`，软标签为 `[...,C]`。
-`ignore_index=-100` 用于忽略硬标签位置；`mean` 仅除以有效位置数，
-`sum` 求和，`none` 保留逐位置损失。
+先做 LogSoftmax，用 `log_probs[batch_indices, targets]` 取每个样本正确类别的 log 概率。
+logits 为 `[B,C]`，targets 为 `[B]`，最后取负值并求平均。
 
 **代码：[EntropyLoss.py](loss/EntropyLoss.py)**
 
@@ -680,7 +672,7 @@ $m_{bt}$ 标记需要训练的位置，$N=\sum m$ 是有效预测 token 数。
 **实现思路**
 
 将 `logits[:, :-1, :]` 与 `labels[:, 1:]` 对齐，再展平并计算交叉熵。
-labels 中的 `-100` 不参与损失；全忽略时返回可反传的零。
+labels 中的 `-100` 不参与损失。
 输入 logits 为 `[B,T,V]`，labels 为 `[B,T]`。
 
 <details>
@@ -758,7 +750,6 @@ $\hat q_i,\hat k_j$ 是归一化的特征，$\tau$ 是温度，B 是批大小。
 
 输入两组 `[B,D]` 特征，先 L2 归一化，再计算 `queries @ keys.T / temperature`。
 对 `[B,B]` 相似度矩阵做交叉熵，目标为 `arange(B)`。
-`symmetric=True` 平均两个检索方向的损失。
 
 **代码：[InfoNCELoss.py](loss/InfoNCELoss.py)**
 
@@ -849,7 +840,7 @@ $\epsilon$ 是稳定项，$\epsilon_c$ 是裁剪幅度；r 是新旧策略概率
 
 **实现思路**
 
-`compute_grpo_advantages` 对 `[B,G]` 奖励沿组维求均值与总体标准差。
+`compute_grpo_advantages` 对 `[B,G]` 奖励沿组维调用 `mean` 和 `std`。
 `grpo_loss` 对同形状的 log 概率与优势逐元素计算裁剪目标，再求平均；
 提供 `ref_kl` 时加入 KL 项。此基础函数不接收 response mask，
 变长回答需要调用者明确 token / 序列的归约方式。
@@ -878,7 +869,7 @@ $\epsilon_{low}$ 与 $\epsilon_{high}$ 分别控制下界和上界。
 
 old / new log 概率为 `[B,T]`，优势可为 `[B]`、`[B,1]` 或 `[B,T]`。
 将序列优势广播到 token，计算 ratio 与非对称 clip，再按 mask 求和并除以有效 token 数。
-默认裁剪参数为 0.2 / 0.28；旧策略和优势作为 rollout 数据 detach。
+默认裁剪参数为 0.2 / 0.28。
 文件覆盖损失核心，动态采样等流程由训练系统负责。
 
 **代码：[DAPOLoss.py](loss/DAPOLoss.py)**
@@ -905,7 +896,7 @@ $s_i$ 是 token 比率的几何平均，既不是算术平均，也不是未归�
 
 输入 old / new log 概率 `[B,T]` 和优势 `[B]`。
 先按 mask 求平均 log ratio，再取 exp、裁剪，最后对非空回答求平均。
-默认裁剪参数为 `3e-4` / `4e-4`；旧策略与优势 detach。
+默认裁剪参数为 `3e-4` / `4e-4`。
 
 | 对比 | DAPO | GSPO |
 |---|---|---|
@@ -931,12 +922,12 @@ $$k_1=-l,\qquad k_2=\tfrac12l^2,\qquad k_3=e^l-1-l$$
 
 P 是采样或被约束的策略，Q 是参考分布，KL 方向为 $P\Vert Q$。
 k1 的期望为 KL，但单样本可为负；k2 是局部平方近似，一般有偏。
-k3 加入控制变量，在实际从 P 采样及相应支撑条件下无偏；`expm1(l)-l` 能减少近零相消误差。
+k3 加入控制变量，在实际从 P 采样及相应支撑条件下无偏。
 
 **实现思路**
 
 精确 KL 先求两组 LogSoftmax，按 P 的概率对 log 概率差加权，沿类别求和后对分布求平均。
-采样 KL 根据 log 概率差直接计算所选估计器，再按 mask 归约。
+采样 KL 根据 log 概率差直接计算所选估计器，再对采样值求平均。
 采样方向决定估计含义；对估计值做自动求导不自动等于精确 KL 对策略参数的梯度。
 
 **代码：[EntropyLoss.py](loss/EntropyLoss.py) · [KLDivergence.py](loss/KLDivergence.py)**
@@ -962,7 +953,7 @@ A 随机初始化、B 初始化为零，使微调开始时输出与基础层一�
 
 分别计算基础分支和 `B(A(x))`，缩放后相加。
 基础权重冻结，但输入仍应保留梯度，以便传回前层。
-推理时在 `eval()` 下用 `merged_linear()` 得到独立的合并线性层；此时 dropout 已关闭。
+权重合并公式说明低秩更新可以加回基础矩阵，当前文件展示的是两个分支的直接前向计算。
 
 <details>
 <summary>张量形状示意</summary>
@@ -1060,7 +1051,7 @@ Top-k 保留固定数量候选；Top-p 保留概率降序后累计达到阈值�
 
 按“温度缩放 → Top-k → Top-p → softmax → multinomial”实现。
 过滤候选时将其 logits 设为 `-inf`，跨过 Top-p 阈值的 token 仍要保留。
-`greedy=True` 使用 argmax；随机采样可传 `torch.Generator` 复现结果。
+`greedy=True` 使用 argmax；随机采样用 `torch.manual_seed` 设置随机种子。
 `sample_logits` 返回 `logits.shape[:-1]` 的 token IDs，不修改原 logits。
 
 **代码：[Sampling.py](generation/Sampling.py)**
@@ -1081,8 +1072,8 @@ Top-k 保留固定数量候选；Top-p 保留概率降序后累计达到阈值�
 `response.function_call_arguments.delta` 时累积片段，收到
 `response.function_call_arguments.done` 时用 `json.loads` 解析完整参数。
 
-`feed(event)` 返回刚完成的调用或 `None`；`finish()` 检查是否还有未完成调用。
-`parse_tool_calls(events)` 返回按索引排序的 `ToolCall` 列表，包含名称、调用 ID 和参数。
+`feed(event)` 返回刚完成的调用字典或 `None`；`finish()` 返回已完成调用。
+`parse_tool_calls(events)` 返回按索引排序的字典列表，包含名称、调用 ID 和参数。
 解析完成后，再由调用者执行对应工具。
 
 **代码：[ToolCallParser.py](tools/ToolCallParser.py)**

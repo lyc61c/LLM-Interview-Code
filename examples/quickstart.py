@@ -22,7 +22,7 @@ def main():
     torch.set_num_threads(1)
     linear = Linear(4, 3)
     print("Linear:", tuple(linear(torch.ones(2, 4)).shape))
-    values = torch.tensor([-1000., 0., 1000.])
+    values = torch.tensor([-1., 0., 1.])
     print("Sigmoid / SiLU:", sigmoid(values).tolist(), silu(values).tolist())
 
     ids = torch.tensor([[11, 12, 13, 0]])
@@ -48,17 +48,16 @@ def main():
 
     values = torch.tensor([-2., -.3, 0., 1.2, 3.])
     for quantize in (symmetric_quantize, asymmetric_quantize):
-        quantized = quantize(values)
-        error = (dequantize(quantized) - values).abs().max().item()
-        print(quantize.__name__, "dtype:", quantized.values.dtype, "最大误差:", round(error, 6))
-    rng = torch.Generator().manual_seed(42)
+        quantized, scale, zero_point = quantize(values)
+        error = (dequantize(quantized, scale, zero_point) - values).abs().max().item()
+        print(quantize.__name__, "dtype:", quantized.dtype, "最大误差:", round(error, 6))
     logits = torch.tensor([[2., 1., 0.]])
-    print("Top-p 抽样:", sample_logits(logits, top_p=.9, generator=rng).tolist())
+    print("Top-p 抽样:", sample_logits(logits, top_p=.9).tolist())
 
     queries = torch.randn(4, 6)
     print("InfoNCE:", round(info_nce_loss(queries, queries).item(), 6))
-    soft_targets = torch.tensor([[.7, .2, .1]])
-    print("软标签 CE:", round(cross_entropy_loss(logits, soft_targets).item(), 6))
+    targets = torch.tensor([0])
+    print("交叉熵:", round(cross_entropy_loss(logits, targets).item(), 6))
     old = torch.zeros(2, 3)
     new = torch.zeros(2, 3)
     advantages = torch.tensor([1., -1.])
@@ -76,7 +75,7 @@ def main():
         {"type": "response.function_call_arguments.done", "output_index": 0, "arguments": '{"city":"上海"}'},
     ]
     calls = parse_tool_calls(events)
-    print("工具参数解析:", calls[0].name, calls[0].arguments)
+    print("工具参数解析:", calls[0]["name"], calls[0]["arguments"])
 
 
 if __name__ == "__main__":

@@ -1,54 +1,47 @@
-"""手写 padding / causal mask：本仓库统一 True 或 1 表示允许注意。
+"""
+注意力掩码：Padding Mask 与 Causal Mask
 
-注意：该约定与 nn.MultiheadAttention 的布尔 mask 相反，但与
-torch.nn.functional.scaled_dot_product_attention 的布尔 mask 一致。
-所有函数返回可广播到 [batch, heads, query_len, key_len] 的布尔张量。
+与原仓库一致，1 / True 表示允许注意，0 / False 表示屏蔽。
 """
 
 import torch
 
 
 def create_padding_mask(input_ids, pad_token_id=0):
-    """由 [B, K] token id 构造 [B, 1, 1, K] 的 key padding mask。
+    """由 [batch_size, seq_len] 构造 [batch_size, 1, 1, seq_len]。
 
-    只屏蔽被关注的 padding key；需要屏蔽 padding query 时见
-    create_attention_mask。input_ids 在缓存解码时应包含历史与当前 token。
+    Padding Mask 屏蔽作为 Key 的补齐位置。
     """
     return (input_ids != pad_token_id)[:, None, None, :]
 
 
 def create_causal_mask(query_len, key_len=None, past_len=0, device=None):
-    """允许 key_position <= past_len + query_position，返回 [1, 1, Q, K]。
+    """构造 [1, 1, query_len, key_len] 的因果掩码。
 
-    prefill：past_len=0，Q=K。解码：K=past_len+Q；例如 past_len=3、Q=2，
-    两行分别允许 key 0..3 与 0..4。不能直接对矩形 [Q, K] 做 tril，
-    否则新 query 将无法看到完整缓存。
+    已缓存 past_len 个 token 时，第 q 个新 Query 的绝对位置为 past_len+q。
+    允许注意的条件：key_position <= past_len + query_position。
     """
     if key_len is None:
         key_len = past_len + query_len
-    # 将 query 的局部位置移到历史缓存之后，再与 key 的绝对位置比较。
+
+    # Query 从历史缓存之后开始，Key 从整个序列的开头开始。
     query_positions = torch.arange(query_len, device=device) + past_len
     key_positions = torch.arange(key_len, device=device)
-    return (key_positions[None, :] <= query_positions[:, None])[None, None, :, :]
+    mask = key_positions[None, :] <= query_positions[:, None]
+
+    return mask[None, None, :, :]
 
 
-def create_attention_mask(input_ids, pad_token_id=0, query_len=None,
-                          past_len=0, mask_query_padding=True):
-    """合并 padding 与 causal mask，返回 [B, 1, Q, K]。
+def create_attention_mask(input_ids, pad_token_id=0, past_len=0):
+    """合并 Padding 与 Causal Mask，返回 [batch_size, 1, query_len, key_len]。
 
-    input_ids=[B, K] 包含完整历史，K=past_len+query_len；
-    当前 query 对应位置 past_len..K-1，各长度为整数、past_len 非负。
-    默认同时屏蔽 padding query，因而它们会产生全屏蔽行；仓库的手写
-    attention 明确定义这种行的权重、context 和最终输出均为零。
-    mask_query_padding=False 时仅屏蔽 key，适用于只需标准 key mask 的场景。
+    input_ids 包含历史与本轮 token；query_len = key_len - past_len。
+    用逻辑与合并：既不是 padding key，也不是未来 key，才允许注意。
     """
+    key_len = input_ids.size(1)
+    query_len = key_len - past_len
+
     padding_mask = create_padding_mask(input_ids, pad_token_id)
-    key_len = input_ids.shape[1]
-    if query_len is None:
-        query_len = key_len - past_len
     causal_mask = create_causal_mask(query_len, key_len, past_len, input_ids.device)
-    mask = padding_mask & causal_mask
-    if mask_query_padding:
-        query_valid = input_ids[:, past_len:past_len + query_len] != pad_token_id
-        mask = mask & query_valid[:, None, :, None]
-    return mask
+
+    return padding_mask & causal_mask

@@ -1,8 +1,4 @@
-"""教学版 byte-level BPE：基础词表覆盖所有 256 个 UTF-8 字节。
-
-可无损处理中文、未见字符和空白。不添加词尾标记，也不使用 split() 丢空格。
-这不是完整 GPT-2 tokenizer：没有正则预分词、特殊 token 或训练文件格式。
-"""
+"""手写 byte-level BPE：统计相邻 token 对，合并高频对，按学习顺序编码。"""
 
 from collections import Counter
 
@@ -10,22 +6,16 @@ from collections import Counter
 class ByteBPETokenizer:
     """每轮合并训练语料中出现最频繁的相邻 token 对。
 
-    同频率时按 token ID 对的字典序决定，训练结果可复现。
-    编码遵守学习到的 merge rank，而不是重新按待编码文本中的频率合并。
+    编码按学习到的合并顺序使用规则，而不是重新统计待编码文本的频率。
     每条训练文本独立统计，合并不能跨文档边界；文档内部允许合并空白。
     """
 
     def __init__(self):
-        self._reset()
-
-    def _reset(self):
         self.vocab = {i: bytes([i]) for i in range(256)}
         self.merges = []
-        self._merge_ids = {}
-        self._ranks = {}
 
-    @staticmethod
-    def _merge(tokens, pair, new_id):
+    def merge_pair(self, tokens, pair, new_id):
+        """从左到右将相邻 pair 替换为 new_id，不重叠合并。"""
         result = []
         position = 0
         while position < len(tokens):
@@ -40,35 +30,29 @@ class ByteBPETokenizer:
     def fit(self, texts, num_merges=256, min_frequency=2):
         """训练并返回 self；再次 fit 会重置模型。
 
-        texts 是 str 或 str iterable；num_merges>=0，min_frequency>=1。
+        texts 为字符串列表；num_merges>=0，min_frequency>=1。
         """
-        texts = [texts] if isinstance(texts, str) else texts
-        self._reset()
+        self.vocab = {i: bytes([i]) for i in range(256)}
+        self.merges = []
         sequences = [list(text.encode("utf-8")) for text in texts]
         for _ in range(num_merges):
             counts = Counter(pair for tokens in sequences for pair in zip(tokens, tokens[1:]))
             if not counts:
                 break
-            pair = min(counts, key=lambda value: (-counts[value], value))
+            pair = max(counts, key=counts.get)
             if counts[pair] < min_frequency:
                 break
             new_id = len(self.vocab)
             self.vocab[new_id] = self.vocab[pair[0]] + self.vocab[pair[1]]
-            self._ranks[pair] = len(self.merges)
-            self._merge_ids[pair] = new_id
             self.merges.append(pair)
-            sequences = [self._merge(tokens, pair, new_id) for tokens in sequences]
+            sequences = [self.merge_pair(tokens, pair, new_id) for tokens in sequences]
         return self
 
     def encode(self, text):
         """text 为 str；返回 token ID 列表，空串返回 []，未见字节无 OOV。"""
         tokens = list(text.encode("utf-8"))
-        while len(tokens) > 1:
-            available = {pair for pair in zip(tokens, tokens[1:]) if pair in self._ranks}
-            if not available:
-                break
-            pair = min(available, key=self._ranks.__getitem__)
-            tokens = self._merge(tokens, pair, self._merge_ids[pair])
+        for rank, pair in enumerate(self.merges):
+            tokens = self.merge_pair(tokens, pair, 256 + rank)
         return tokens
 
     def decode(self, token_ids):

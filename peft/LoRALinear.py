@@ -9,6 +9,7 @@ LoRA 线性层（Low-Rank Adaptation Linear）
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
 
@@ -30,7 +31,6 @@ class LoRALinear(nn.Module):
         rank: LoRA 的秩（低秩矩阵的维度），默认 8
         alpha: LoRA 的缩放因子，默认 1.0
         dropout: Dropout 概率，默认 0.0
-                 前提：维度与 rank 为正，0 <= dropout < 1。
     """
 
     def __init__(self, in_features, out_features, rank=8, alpha=1.0, dropout=0.0):
@@ -94,23 +94,6 @@ class LoRALinear(nn.Module):
 
         # 步骤3: 合并原始输出和 LoRA 增量
         return original_output + lora_output
-
-    @torch.no_grad()
-    def merged_linear(self):
-        """返回合并后的独立 nn.Linear，保留原模块及其训练状态。
-
-        W_merged = W_0 + (alpha / rank) * B @ A。
-        合并前调用 eval()；训练中的非零 dropout 无法被固定权重表示。
-        """
-        merged = nn.Linear(
-            self.weight.in_features, self.weight.out_features, bias=False,
-            device=self.weight.weight.device, dtype=self.weight.weight.dtype,
-        )
-        merged.weight.copy_(
-            self.weight.weight + self.scaling * (self.lora_b.weight @ self.lora_a.weight)
-        )
-        merged.requires_grad_(False)
-        return merged.eval()
 
 
 # --- 测试代码 ---

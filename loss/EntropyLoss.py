@@ -1,84 +1,134 @@
-"""手写 Softmax、LogSoftmax、交叉熵和全分布 KL。
+"""
+熵相关损失函数
 
-输入为浮点 logits，类别维在最后一维，相关张量由调用者放在同一设备。
-有效行应能定义概率分布；硬/软标签的形状与取值约定见各函数说明。
+包含用于大语言模型训练的常用损失函数：
+- Softmax：数值稳定的 softmax 实现
+- Log Softmax：数值稳定的 log softmax 实现
+- Cross Entropy Loss：交叉熵损失
+- KL Divergence：KL 散度（用于知识蒸馏、DPO 等）
 """
 
+import math
 import torch
 
 
 def softmax(logits):
-    """输入/输出 [..., C]；减去最大值后计算指数，避免指数溢出。"""
-    if logits.dtype in (torch.float16, torch.bfloat16):
-        logits = logits.float()
+    """
+    数值稳定的 Softmax 函数
 
-    # 步骤1: 减去每行最大值，不改变 softmax 的结果。
-    shifted = logits - logits.max(dim=-1, keepdim=True).values
+    通过减去最大值来避免数值溢出问题。
 
-    # 步骤2: 对指数结果归一化，类别概率之和为 1。
-    exp_shifted = shifted.exp()
-    return exp_shifted / exp_shifted.sum(dim=-1, keepdim=True)
+    Args:
+        logits: 未归一化的对数概率 [batch_size, num_classes]
+
+    Returns:
+        softmax: 归一化的概率分布 [batch_size, num_classes]
+    """
+    # 步骤1: 计算每个样本的最大值用于数值稳定性
+    # max_logits: [batch_size, 1]
+    max_logits, _ = torch.max(logits, dim=-1, keepdim=True)
+
+    # 步骤2: 减去最大值后计算 exp，避免溢出
+    # exp_shifted: [batch_size, num_classes]
+    exp_shifted = torch.exp(logits - max_logits)
+
+    # 步骤3: 计算 softmax 分母
+    # sum_exp: [batch_size, 1]
+    sum_exp = torch.sum(exp_shifted, dim=-1, keepdim=True)
+
+    # 步骤4: 归一化得到概率分布
+    # softmax: [batch_size, num_classes]
+    return exp_shifted / sum_exp
 
 
 def log_softmax(logits):
-    """log p = (x-max(x)) - log(sum(exp(x-max(x))))，类别维为最后一维。"""
-    if logits.dtype in (torch.float16, torch.bfloat16):
-        logits = logits.float()
-
-    # 直接求 log 概率，避免先 softmax 再 log 时概率下溢。
-    shifted = logits - logits.max(dim=-1, keepdim=True).values
-    return shifted - shifted.exp().sum(dim=-1, keepdim=True).log()
-
-
-def cross_entropy_loss(logits, targets, reduction="mean", ignore_index=-100):
-    """硬标签 CE=-log p_y；软标签 CE=-sum_c target_c * log p_c。
-
-    logits: [..., C]。硬标签 targets: [...] 的整数类别索引；软标签:
-    [..., C] 的非负浮点概率，每行和为 1。reduction 使用 none/sum/mean。
-    ignore_index 仅用于硬标签；mean 只平均有效位置，全忽略时返回可导的 0。
     """
-    # 步骤1: 根据标签形状区分软标签与硬标签。
-    if targets.shape == logits.shape:
-        log_probs = log_softmax(logits)
-        # 目标概率为 0 的类别不贡献 CE，按 0*log(0)=0 处理。
-        log_probs = torch.where(targets > 0, log_probs, 0.0)
-        losses = -(targets * log_probs).sum(dim=-1)
-        valid = torch.ones_like(losses, dtype=torch.bool)
-    else:
-        valid = targets != ignore_index
-        # 忽略行在 softmax 前置零；忽略索引也替换成可供 gather 使用的 0。
-        safe_logits = torch.where(valid.unsqueeze(-1), logits, 0.0)
-        safe_targets = torch.where(valid, targets, 0).long()
-        log_probs = log_softmax(safe_logits)
-        losses = -log_probs.gather(-1, safe_targets.unsqueeze(-1)).squeeze(-1)
-        losses = torch.where(valid, losses, 0.0)
+    数值稳定的 Log Softmax 函数
 
-    # 步骤2: 保留每个位置、求和，或按有效位置数求平均。
-    if reduction == "none":
-        return losses
-    if reduction == "sum":
-        return losses.sum()
-    return losses.sum() / valid.sum().clamp_min(1)
+    使用 Log-Sum-Exp 技巧保证数值稳定性。
+    公式: log_softmax(x) = x - log(sum(exp(x)))
 
+    Args:
+        logits: 未归一化的对数概率 [batch_size, num_classes]
 
-def KL_divergence(p_logits, q_logits, reduction="mean"):
-    """精确 KL(P||Q)=sum_c P_c(log P_c-log Q_c)。
-
-    输入相同形状 [..., C] 的 logits。none 返回 [...]，sum 求和，
-    mean 对分布平均。在二维输入下对应 PyTorch kl_div(log Q, P, batchmean)。
+    Returns:
+        log_softmax: 对数概率 [batch_size, num_classes]
     """
-    # 步骤1: 得到两个分布的 log 概率，以及分布 P 的概率。
-    p_log_probs = log_softmax(p_logits)
-    q_log_probs = log_softmax(q_logits)
-    p_probs = p_log_probs.exp()
+    # 步骤1: 计算最大值用于数值稳定性
+    # max_logits: [batch_size, 1]
+    max_logits, _ = torch.max(logits, dim=-1, keepdim=True)
 
-    # 步骤2: 沿类别维累加；P=0 的类别贡献为 0。
-    log_difference = torch.where(p_probs > 0, p_log_probs - q_log_probs, 0.0)
-    losses = (p_probs * log_difference).sum(dim=-1)
+    # 步骤2: Log-Sum-Exp 技巧
+    # log(sum(exp(x))) = max + log(sum(exp(x - max)))
+    # exp_shifted: [batch_size, num_classes]
+    exp_shifted = torch.exp(logits - max_logits)
 
-    # 步骤3: 对分布归约，而不是对所有类别元素取平均。
-    if reduction == "none":
-        return losses
-    if reduction == "sum":
-        return losses.sum()
-    return losses.sum() / max(losses.numel(), 1)
+    # log_sum_exp: [batch_size, 1]
+    log_sum_exp = max_logits + torch.log(torch.sum(exp_shifted, dim=-1, keepdim=True))
+
+    # 步骤3: 计算 log softmax
+    # log_softmax: [batch_size, num_classes]
+    return logits - log_sum_exp
+
+
+def cross_entropy_loss(logits, targets):
+    """
+    交叉熵损失函数
+
+    用于分类任务的标准损失函数。
+    公式: CE = -log(p[y])，其中 y 是真实类别
+
+    Args:
+        logits: 模型输出的未归一化对数概率 [batch_size, num_classes]
+        targets: 真实类别索引 [batch_size]
+
+    Returns:
+        loss: 标量损失值
+    """
+    # 步骤1: 计算 log softmax
+    # log_probs: [batch_size, num_classes]
+    log_probs = log_softmax(logits)
+
+    # 步骤2: 提取真实类别的 log 概率
+    batch_size = logits.size(0)
+    batch_indices = torch.arange(batch_size)
+
+    # loss: [batch_size]
+    loss = -log_probs[batch_indices, targets]
+
+    # 步骤3: 返回平均损失
+    return loss.mean()
+
+
+def KL_divergence(p_logits, q_logits):
+    """
+    KL 散度（Kullback-Leibler Divergence）
+
+    衡量两个概率分布 P 和 Q 之间的差异。
+    公式: D_KL(P || Q) = sum(P(x) * (log P(x) - log Q(x)))
+
+    常用于知识蒸馏、DPO 训练等场景。
+
+    Args:
+        p_logits: 分布 P 的 logits [batch_size, num_classes]
+        q_logits: 分布 Q 的 logits [batch_size, num_classes]
+
+    Returns:
+        kl_div: 标量 KL 散度值
+    """
+    # 步骤1: 计算两个分布的 log softmax
+    # p_log_softmax: [batch_size, num_classes]
+    # q_log_softmax: [batch_size, num_classes]
+    p_log_softmax = log_softmax(p_logits)
+    q_log_softmax = log_softmax(q_logits)
+
+    # 步骤2: 计算 P 的概率分布
+    # p_softmax: [batch_size, num_classes]
+    p_softmax = softmax(p_logits)
+
+    # 步骤3: 计算 KL 散度
+    # D_KL(P || Q) = sum(P(x) * (log P(x) - log Q(x)))
+    # kl_div: [batch_size]
+    kl_div = torch.sum(p_softmax * (p_log_softmax - q_log_softmax), dim=-1)
+
+    return kl_div.mean()
